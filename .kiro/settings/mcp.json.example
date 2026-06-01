@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "kiro-gpt-bridge": {
+      "command": "node",
+      "args": ["./mcp-server/dist/index.js"],
+      "env": {
+        "KIRO_GPT_MCP_SECRET": "<your-kiro-secret>",
+        "KIRO_GPT_MCP_RELAY_URL": "ws://localhost:3001",
+        "KIRO_GPT_MCP_WORKSPACE": "<absolute-path-to-workspace-or-leave-unset-for-Downloads-default>"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "generate_image",
+        "generate_logo",
+        "generate_hero",
+        "generate_icon_set",
+        "generate_ui_mockup"
+      ]
+    }
+  }
+}

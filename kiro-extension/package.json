@@ -1,0 +1,160 @@
+{
+  "name": "@kiro-gpt-bridge/kiro-extension",
+  "version": "0.0.0",
+  "private": true,
+  "main": "./dist/extension.js",
+  "types": "./dist/extension.d.ts",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kiroGptBridge",
+          "title": "ChatGPT Bridge",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "kiroGptBridge": [
+        {
+          "type": "webview",
+          "id": "kiroGptBridge.panel",
+          "name": "ChatGPT Bridge"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "kiroGptBridge.openPanel",
+        "title": "ChatGPT Bridge: Open Panel",
+        "category": "ChatGPT Bridge"
+      },
+      {
+        "command": "kiroGptBridge.generateImage",
+        "title": "ChatGPT Bridge: Generate Image",
+        "category": "ChatGPT Bridge"
+      },
+      {
+        "command": "kiroGptBridge.explainCode",
+        "title": "ChatGPT Bridge: Explain Code",
+        "category": "ChatGPT Bridge"
+      },
+      {
+        "command": "kiroGptBridge.refactorCode",
+        "title": "ChatGPT Bridge: Refactor Code",
+        "category": "ChatGPT Bridge"
+      },
+      {
+        "command": "kiroGptBridge.generateTests",
+        "title": "ChatGPT Bridge: Generate Tests",
+        "category": "ChatGPT Bridge"
+      },
+      {
+        "command": "kiroGptBridge.documentCode",
+        "title": "ChatGPT Bridge: Document Code",
+        "category": "ChatGPT Bridge"
+      },
+      {
+        "command": "kiroGptBridge.findBugs",
+        "title": "ChatGPT Bridge: Find Bugs",
+        "category": "ChatGPT Bridge"
+      },
+      {
+        "command": "kiroGptBridge.optimizeCode",
+        "title": "ChatGPT Bridge: Optimize Code",
+        "category": "ChatGPT Bridge"
+      },
+      {
+        "command": "kiroGptBridge.generateMissingAsset",
+        "title": "ChatGPT Bridge: Generate This Missing Asset",
+        "category": "ChatGPT Bridge"
+      },
+      {
+        "command": "kiroGptBridge.generateMissingAssets",
+        "title": "ChatGPT Bridge: Generate Missing Visual Assets",
+        "category": "ChatGPT Bridge"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "kiroGptBridge.explainCode",
+          "when": "editorTextFocus",
+          "group": "kiroGptBridge@1"
+        },
+        {
+          "command": "kiroGptBridge.refactorCode",
+          "when": "editorTextFocus",
+          "group": "kiroGptBridge@2"
+        },
+        {
+          "command": "kiroGptBridge.generateTests",
+          "when": "editorTextFocus",
+          "group": "kiroGptBridge@3"
+        },
+        {
+          "command": "kiroGptBridge.documentCode",
+          "when": "editorTextFocus",
+          "group": "kiroGptBridge@4"
+        },
+        {
+          "command": "kiroGptBridge.findBugs",
+          "when": "editorTextFocus",
+          "group": "kiroGptBridge@5"
+        },
+        {
+          "command": "kiroGptBridge.optimizeCode",
+          "when": "editorTextFocus",
+          "group": "kiroGptBridge@6"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "ChatGPT Bridge",
+      "properties": {
+        "kiroGptBridge.relayUrl": {
+          "type": "string",
+          "default": "",
+          "description": "WebSocket URL of the KIRO-GPT Bridge relay server (e.g., ws://localhost:3001). Required for the extension to connect."
+        },
+        "kiroGptBridge.sessionHistoryMax": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50,
+          "description": "Maximum number of prior messages included in each request's session history. R15.4."
+        },
+        "kiroGptBridge.autoGenerateAssets": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, suggest auto-generation of missing image assets via DALL·E. R30.7."
+        },
+        "kiroGptBridge.kiroSecret": {
+          "type": "string",
+          "default": "",
+          "description": "Shared secret presented to the relay server during the Socket.IO handshake. R2.1."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "vitest --run",
+    "lint": "eslint src --ext .ts,.tsx"
+  },
+  "dependencies": {
+    "@kiro-gpt-bridge/shared": "*",
+    "socket.io-client": "^4.7.5"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.74.0",
+    "@types/node": "^20.12.0",
+    "jsdom": "^24.0.0",
+    "@types/jsdom": "^21.1.7"
+  }
+}

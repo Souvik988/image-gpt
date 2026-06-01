@@ -1,0 +1,39 @@
+# Build context applies from the workspace root (where `docker build` is run).
+# Keep the build context lean and reproducible.
+
+# Dependency artifacts — reinstalled inside the image
+**/node_modules
+
+# Build outputs — rebuilt inside the image
+**/dist
+
+# Tests and coverage — never shipped in the image
+**/test
+**/*.test.ts
+**/*.slow.test.ts
+**/coverage
+
+# VCS, editor, and Kiro spec metadata
+.git
+.gitignore
+.kiro
+.editorconfig
+.eslintrc.cjs
+.prettierrc
+.vscode
+.idea
+
+# Other workspaces the relay does not need
+browser-agent
+kiro-extension
+mcp-server
+
+# Local environment / secrets
+*.env
+.env
+.env.*
+
+# Logs and OS noise
+*.log
+.DS_Store
+Thumbs.db

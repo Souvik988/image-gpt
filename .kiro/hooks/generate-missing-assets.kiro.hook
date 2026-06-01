@@ -1,0 +1,27 @@
+{
+  "name": "Generate Missing Visual Assets",
+  "version": "1.0.0",
+  "description": "[Implements: R32.3 / R32.4] On save of a frontend file, scan for missing image references and generate them via the kiro-gpt-bridge MCP tools. Gated on the user setting kiroGptBridge.autoGenerateAssets === true.",
+  "enabled": true,
+  "settingGate": {
+    "setting": "kiroGptBridge.autoGenerateAssets",
+    "equals": true
+  },
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "**/*.tsx",
+      "**/*.jsx",
+      "**/*.vue",
+      "**/*.svelte",
+      "**/*.html",
+      "**/*.css",
+      "**/*.scss",
+      "**/*.astro"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "[R32.3 — visual-asset hook for code edits] First, check the user setting `kiroGptBridge.autoGenerateAssets`. If it is not strictly equal to `true`, stop without taking any action. Otherwise: scan the file that was just saved for missing image references — `<img src=…>`, `<Image src=…>`, `<source src=…>`, `background-image: url(…)`, `![alt](path)`, `import x from '…image'`, and equivalent framework-specific forms. For every reference whose resolved path is inside the workspace and does not yet exist on disk, call the most appropriate kiro-gpt-bridge MCP tool from the kiro-gpt-bridge MCP server: `kiroGpt.generateLogo` / `generate_logo` for logos, `kiroGpt.generateHero` / `generate_hero` for hero images, `kiroGpt.generateIconSet` / `generate_icon_set` for icon sets, `kiroGpt.generateUiMockup` / `generate_ui_mockup` for UI mockups, otherwise `kiroGpt.generateImage` / `generate_image`. Derive each tool's `prompt` and `assetCategory`/`kind` from the surrounding code context (component name, alt text, nearby comments). Save each asset into the framework's default asset directory (auto-detected by the MCP server's path resolver). When the tool returns a `savedPath` that does not match the original missing reference, replace the reference in the source file with that exact `savedPath`. Do not emit placeholder paths or `TODO: add image` comments."
+  }
+}

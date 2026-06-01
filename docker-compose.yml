@@ -1,0 +1,52 @@
+# Implements R25.1, R25.2, R25.3, R25.4.
+#
+# This compose file ONLY runs the relay. The browser-agent always runs
+# locally on the user's workstation outside Docker because it requires a
+# non-headless Chromium with a persistent profile (R25.4).
+#
+# Env vars expected at deploy time:
+#   KIRO_SECRET           required, 16-256 chars
+#   AGENT_SECRET          required, 16-256 chars
+#   RELAY_TLS_ENABLED     "true" | "false" (default "false")
+#   RELAY_TLS_CERT        path inside the container (mount via volume) when TLS enabled
+#   RELAY_TLS_KEY         path inside the container (mount via volume) when TLS enabled
+#   QUEUE_MAX_DEPTH       optional, 100-100000 (default 1000)
+
+version: '3.9'
+
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: relay-server/Dockerfile
+    image: kiro-gpt-bridge-relay:latest
+    container_name: kiro-gpt-bridge-relay
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      KIRO_SECRET: ${KIRO_SECRET:?KIRO_SECRET is required}
+      AGENT_SECRET: ${AGENT_SECRET:?AGENT_SECRET is required}
+      RELAY_TLS_ENABLED: ${RELAY_TLS_ENABLED:-false}
+      RELAY_TLS_CERT: ${RELAY_TLS_CERT:-}
+      RELAY_TLS_KEY: ${RELAY_TLS_KEY:-}
+      QUEUE_MAX_DEPTH: ${QUEUE_MAX_DEPTH:-1000}
+      PORT: ${PORT:-3001}
+    healthcheck:
+      # R25.3: poll /health every 30s with 5s timeout and 3 retries.
+      test:
+        - "CMD-SHELL"
+        - "wget --quiet --tries=1 --spider http://localhost:${PORT:-3001}/health || exit 1"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    volumes:
+      # When TLS is enabled, mount the cert + key into the container.
+      # The paths inside the container are whatever RELAY_TLS_CERT/KEY refer to.
+      # By convention, mount them under /etc/relay-tls and set the env vars
+      # to those paths in your `.env`. Comment-out the volume entry when
+      # RELAY_TLS_ENABLED=false.
+      - ./tls:/etc/relay-tls:ro
+
+# Browser-agent runs locally outside Docker (R25.4) — see README.md.

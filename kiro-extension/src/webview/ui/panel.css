@@ -1,0 +1,591 @@
+/*
+ * ChatGPT Bridge sidebar webview styles — task 18.2.
+ *
+ * All colours are wired to VS Code theme tokens (`--vscode-*`) so the
+ * panel tracks the user's selected theme automatically. Plain values
+ * are provided as fallbacks for environments where the tokens are not
+ * present (JSDOM tests, standalone preview).
+ *
+ * Layout:
+ *   - #panel-header is pinned to the top of the flex column.
+ *   - #thread-list is a thin sidebar (~200 px) — but because the
+ *     sidebar webview is itself narrow, on very small widths it
+ *     collapses above the messages region rather than to the side.
+ *   - #messages flexes to fill remaining space and scrolls.
+ *   - #composer is pinned to the bottom of the flex column.
+ *
+ * Streaming-state visibility (R16.4 / R16.5):
+ *   While `.message[data-streaming="true"]` is set, all `.code-actions`,
+ *   `.copy-btn`, `.insert-btn`, and `.save-btn` inside that message are
+ *   hidden. When the host posts the final chunk (`isFinal: true`),
+ *   panel.js flips the attribute to `"false"` and the controls become
+ *   visible automatically. The `.stop-btn` follows the inverse rule.
+ */
+
+:root {
+  --bg: var(--vscode-editor-background, #1e1e1e);
+  --fg: var(--vscode-editor-foreground, #d4d4d4);
+  --bg-soft: var(--vscode-sideBar-background, #252526);
+  --bg-soft-2: var(--vscode-editorWidget-background, #2d2d30);
+  --border: var(--vscode-panel-border, #3c3c3c);
+  --accent: var(--vscode-button-background, #0e639c);
+  --accent-fg: var(--vscode-button-foreground, #ffffff);
+  --accent-hover: var(--vscode-button-hoverBackground, #1177bb);
+  --secondary-bg: var(--vscode-button-secondaryBackground, #3a3d41);
+  --secondary-fg: var(--vscode-button-secondaryForeground, #ffffff);
+  --secondary-hover: var(--vscode-button-secondaryHoverBackground, #45494e);
+  --muted: var(--vscode-descriptionForeground, #969696);
+  --error: var(--vscode-errorForeground, #f48771);
+  --warn: var(--vscode-editorWarning-foreground, #cca700);
+  --ok: var(--vscode-testing-iconPassed, #73c991);
+  --code-bg: var(--vscode-textCodeBlock-background, #1b1b1b);
+  --code-fg: var(--vscode-editor-foreground, #d4d4d4);
+  --user-bg: var(--vscode-list-hoverBackground, #2a2d2e);
+  --assistant-bg: var(--vscode-sideBar-background, #252526);
+  --font-ui: var(--vscode-font-family, "Segoe UI", system-ui, sans-serif);
+  --font-mono: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
+  --font-size: var(--vscode-font-size, 13px);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--font-size);
+  line-height: 1.45;
+}
+
+body {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  grid-template-columns: 200px 1fr;
+  grid-template-areas:
+    "header  header"
+    "threads messages"
+    "threads composer";
+  height: 100vh;
+  min-height: 0;
+}
+
+@media (max-width: 480px) {
+  body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto 1fr auto;
+    grid-template-areas:
+      "header"
+      "threads"
+      "messages"
+      "composer";
+  }
+}
+
+/* ─── Header ─────────────────────────────────────────────────────────── */
+
+#panel-header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+  font-size: 0.9em;
+}
+
+.header-status {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--bg-soft-2);
+  color: var(--muted);
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+.header-status[data-state="connected"] {
+  color: var(--ok);
+}
+
+.header-status[data-state="streaming"] {
+  color: var(--accent);
+}
+
+.header-status[data-state="queued"] {
+  color: var(--warn);
+}
+
+.header-status[data-state="cancelled"] {
+  color: var(--warn);
+}
+
+.header-status[data-state="disconnected"] {
+  color: var(--error);
+}
+
+.header-meta {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.header-meta-sep {
+  margin: 0 4px;
+  opacity: 0.5;
+}
+
+/* ─── Thread list ────────────────────────────────────────────────────── */
+
+#thread-list {
+  grid-area: threads;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--bg-soft);
+  overflow: hidden;
+  min-height: 0;
+}
+
+#new-thread {
+  margin: 8px;
+  padding: 6px 10px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: 0;
+  border-radius: 3px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+#new-thread:hover {
+  background: var(--accent-hover);
+}
+
+#threads {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#threads .thread {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  color: var(--fg);
+}
+
+#threads .thread:hover,
+#threads .thread.is-active {
+  background: var(--bg-soft-2);
+}
+
+#threads .thread-name {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#threads .thread-delete {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1em;
+  padding: 0 6px;
+  border-radius: 50%;
+}
+
+#threads .thread-delete:hover {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* ─── Messages region ────────────────────────────────────────────────── */
+
+#messages {
+  grid-area: messages;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.message {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: var(--assistant-bg);
+}
+
+.message[data-role="user"] {
+  background: var(--user-bg);
+}
+
+.message-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 0.85em;
+  color: var(--muted);
+}
+
+.message-role {
+  font-weight: 600;
+  text-transform: capitalize;
+  color: var(--fg);
+}
+
+/* Pulsing dot indicator while streaming. R16.4. */
+.message[data-streaming="true"] .message-status::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.2s infinite ease-in-out;
+  vertical-align: middle;
+}
+
+.message[data-status="interrupted"] .message-status {
+  color: var(--warn);
+}
+
+.message[data-status="failed"] .message-status {
+  color: var(--error);
+}
+
+.message[data-status="cancelled"] .message-status {
+  color: var(--warn);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+
+.body {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.body p {
+  margin: 0 0 0.6em 0;
+}
+
+.body p:last-child {
+  margin-bottom: 0;
+}
+
+.body img {
+  max-width: 100%;
+  margin: 6px 0;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.body code:not(.code-inner) {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}
+
+.message-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/*
+ * R16.4: while streaming, hide Copy / Insert (per-code-block) and the
+ * per-message Save buttons.
+ *
+ * R20.1: Stop button is the inverse — visible while streaming, hidden
+ * once the message is final.
+ */
+.message[data-streaming="true"] .code-actions,
+.message[data-streaming="true"] .save-btn {
+  display: none;
+}
+
+.message[data-streaming="false"] .stop-btn {
+  display: none;
+}
+
+/* ─── Code blocks ────────────────────────────────────────────────────── */
+
+.code-block {
+  position: relative;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--code-bg);
+  overflow: hidden;
+}
+
+.code-block pre {
+  margin: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--code-fg);
+  white-space: pre;
+}
+
+.code-block code.code-inner {
+  font-family: inherit;
+  white-space: pre;
+  background: transparent;
+  padding: 0;
+}
+
+.code-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 4px;
+}
+
+.code-block[data-lang]::before {
+  content: attr(data-lang);
+  position: absolute;
+  bottom: 4px;
+  right: 8px;
+  font-size: 0.75em;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+/*
+ * R16.2 / R16.3: language-specific token colours. We deliberately do
+ * NOT ship a JS-based highlighter — the tiny token classes below let
+ * panel.js apply colour spans for a small allow-list of languages
+ * (declared in panel.js's RECOGNISED_LANGS), and any unrecognised
+ * language falls through to plain monospaced text. Matches the
+ * "wrap in `<pre data-lang="ts">` and style via CSS" approach.
+ */
+.code-inner .tok-keyword {
+  color: var(--vscode-symbolIcon-keywordForeground, #569cd6);
+}
+
+.code-inner .tok-string {
+  color: var(--vscode-symbolIcon-stringForeground, #ce9178);
+}
+
+.code-inner .tok-number {
+  color: var(--vscode-symbolIcon-numberForeground, #b5cea8);
+}
+
+.code-inner .tok-comment {
+  color: var(--vscode-editorLineNumber-foreground, #6a9955);
+  font-style: italic;
+}
+
+.code-inner .tok-fn {
+  color: var(--vscode-symbolIcon-functionForeground, #dcdcaa);
+}
+
+/* ─── Composer ───────────────────────────────────────────────────────── */
+
+#composer {
+  grid-area: composer;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+#mode-toggle {
+  display: inline-flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  align-self: flex-start;
+}
+
+#mode-toggle button {
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  padding: 4px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85em;
+}
+
+#mode-toggle button[aria-selected="true"] {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+#mode-toggle button:not([aria-selected="true"]):hover {
+  background: var(--bg-soft-2);
+}
+
+#attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+#attachments:empty {
+  display: none;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-soft-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2px 4px 2px 10px;
+  font-size: 0.85em;
+}
+
+.chip-name {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-remove {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1.1em;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 50%;
+}
+
+.chip-remove:hover {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+#input {
+  width: 100%;
+  resize: vertical;
+  min-height: 60px;
+  padding: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+  font-family: var(--font-mono);
+}
+
+#input:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+#composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#composer-error {
+  flex: 1 1 auto;
+  color: var(--error);
+  font-size: 0.85em;
+  min-height: 1em;
+}
+
+#send {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: 0;
+  border-radius: 3px;
+  padding: 6px 16px;
+  cursor: pointer;
+  font: inherit;
+}
+
+#send:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+#send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ─── Action buttons (Copy / Insert / Save / Stop) ───────────────────── */
+
+.copy-btn,
+.insert-btn,
+.save-btn,
+.stop-btn {
+  background: var(--secondary-bg);
+  color: var(--secondary-fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 0.8em;
+  cursor: pointer;
+}
+
+.copy-btn:hover:not(:disabled),
+.insert-btn:hover:not(:disabled),
+.save-btn:hover:not(:disabled),
+.stop-btn:hover:not(:disabled) {
+  background: var(--secondary-hover);
+}
+
+.copy-btn:disabled,
+.insert-btn:disabled,
+.save-btn:disabled,
+.stop-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.stop-btn {
+  border-color: var(--error);
+  color: var(--error);
+}

@@ -1,0 +1,31 @@
+node_modules/
+dist/
+.vscode/
+.idea/
+*.log
+.env
+coverage/
+chrome_profile/
+.DS_Store
+
+# Browser-agent persistent Chromium profile (contains login cookies).
+.agent-profile/
+
+# Locally generated assets (per-user output).
+assets/
+
+# Workspace tracker meta files (Kiro IDE-managed).
+.kiro/tasks/
+
+# Internal scratch / debug files.
+.tsc-build.log
+config-test.log
+.tmp-*
+.*-out.txt
+.run-*.cjs
+.test*.mjs
+.test*.txt
+.tsc-*.cjs
+
+# Local Kiro MCP settings — contains live secrets. Ship the *.example instead.
+.kiro/settings/mcp.json

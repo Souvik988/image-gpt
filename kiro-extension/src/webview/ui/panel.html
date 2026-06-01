@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<!--
+  ChatGPT Bridge sidebar webview shell — task 18.2.
+
+  This file is a TEMPLATE. The panel provider (task 18.3) reads it from
+  disk, substitutes the ${cspSource}, ${cssUri}, and ${jsUri}
+  placeholders with the results of `webview.cspSource` and
+  `webview.asWebviewUri(...)`, and assigns the resulting string to
+  `webviewView.webview.html`. Until the substitution happens the
+  document parses cleanly but the script and stylesheet won't load,
+  which is intentional.
+
+  Implements R12.1 (panel rendering surface), R13.6 (Copy / Insert at
+  cursor per fenced code block), R16.2 / R16.3 (syntax highlighting
+  and unrecognised-language fallback), R16.4 / R16.5 (streaming
+  indicator and post-final action visibility), R17.1 (Chat / Image
+  mode toggle), R20.1 (Stop button per in-flight message).
+
+  The CSP is restrictive on purpose:
+   - default-src 'none' denies everything that isn't explicitly allowed;
+   - script-src ${cspSource} limits scripts to assets served by
+     `webview.asWebviewUri` from the extension's localResourceRoots,
+     blocking remote and inline scripts (no 'unsafe-inline');
+   - style-src ${cspSource} pins stylesheets to the same origin and
+     forbids inline styles — panel.js never assigns to `.style.*`;
+   - img-src ${cspSource} https: data: covers the inline image
+     responses (R17.4) which are returned as `data:` URIs.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src ${cspSource} https: data:; style-src ${cspSource}; script-src ${cspSource};"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="${cssUri}" />
+    <title>ChatGPT Bridge</title>
+  </head>
+  <body>
+    <header id="panel-header">
+      <span class="header-status" id="header-status" data-state="disconnected">Disconnected</span>
+      <span class="header-meta">
+        <span id="agent-count">0 agents</span>
+        <span class="header-meta-sep">·</span>
+        <span id="queue-depth">0 queued</span>
+      </span>
+    </header>
+
+    <section id="thread-list" aria-label="Chat threads">
+      <button id="new-thread" type="button">+ New thread</button>
+      <ul id="threads"></ul>
+    </section>
+
+    <main id="messages" role="log" aria-live="polite"></main>
+
+    <section id="composer">
+      <div id="mode-toggle" role="tablist" aria-label="Submission mode">
+        <button id="mode-chat" role="tab" aria-selected="true" type="button">Chat</button>
+        <button id="mode-image" role="tab" aria-selected="false" type="button">Image</button>
+      </div>
+      <div id="attachments" aria-label="Pending attachments"></div>
+      <textarea
+        id="input"
+        placeholder="Type a prompt…"
+        rows="3"
+        spellcheck="true"
+      ></textarea>
+      <div id="composer-actions">
+        <span id="composer-error" role="alert" aria-live="polite"></span>
+        <button id="send" type="button">Send</button>
+      </div>
+    </section>
+
+    <script type="module" src="${jsUri}"></script>
+  </body>
+</html>

@@ -1,0 +1,29 @@
+{
+  "name": "kiro-gpt-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Monorepo root for the KIRO-GPT Bridge: shared, relay-server, browser-agent, kiro-extension, mcp-server.",
+  "workspaces": [
+    "shared",
+    "relay-server",
+    "browser-agent",
+    "kiro-extension",
+    "mcp-server"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "vitest --run",
+    "test:slow": "vitest --run --config vitest.config.slow.ts",
+    "lint": "eslint . --ext .ts,.tsx",
+    "format": "prettier --write \"**/*.{ts,tsx,md,json,yml,yaml}\""
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0",
+    "fast-check": "^3.19.0",
+    "eslint": "^8.57.0",
+    "@typescript-eslint/parser": "^7.7.0",
+    "@typescript-eslint/eslint-plugin": "^7.7.0",
+    "prettier": "^3.2.5"
+  }
+}
