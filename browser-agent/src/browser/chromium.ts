@@ -227,6 +227,7 @@ export async function launchChromium(opts: LaunchOptions): Promise<Browser> {
     headless: boolean;
     userDataDir: string;
     args: string[];
+    ignoreDefaultArgs?: string[];
     defaultViewport: null;
     timeout: number;
     executablePath?: string;
@@ -234,6 +235,10 @@ export async function launchChromium(opts: LaunchOptions): Promise<Browser> {
     headless: headlessMode, // R8.2 — non-headless on first login, headless after
     userDataDir: opts.userDataDir, // R8.3
     args,
+    // Drop the --enable-automation default switch: Google's OAuth refuses
+    // sign-in from browsers carrying it ("This browser or app may not be
+    // secure"). Stealth already patches navigator.webdriver JS-side.
+    ignoreDefaultArgs: ['--enable-automation'],
     defaultViewport: null,
     timeout: timeoutMs, // R8.1
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
