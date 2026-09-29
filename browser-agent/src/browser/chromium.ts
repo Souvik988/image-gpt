@@ -273,7 +273,10 @@ export async function launchChromium(opts: LaunchOptions): Promise<Browser> {
     ...(process.platform === 'linux'
       ? ['--no-sandbox', '--disable-setuid-sandbox']
       : []),
-    '--disable-blink-features=AutomationControlled',
+    // NOTE: --disable-blink-features=AutomationControlled is intentionally
+    // NOT set here — puppeteer-extra-stealth already injects it, and a
+    // duplicate makes Chrome show an "unsupported command-line flag"
+    // warning bar (itself an automation signal).
     ...(wantVisible
       ? [] // visible: no minimization, default window position on-screen
       : ['--start-minimized', '--window-position=4000,4000']),

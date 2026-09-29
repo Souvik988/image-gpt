@@ -294,6 +294,17 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
         // narrow via an `unknown` hop instead of polluting the driver's
         // surface with puppeteer's exact lifecycle enum.
         const imagePage = worker.page as unknown as ImageDriverPage;
+        // Expose puppeteer's real screenshot capability to the driver for
+        // the rendered-mockup fallback (clip is in document CSS pixels).
+        (imagePage as { screenshot?: unknown }).screenshot = async (opts: {
+          clip?: { x: number; y: number; width: number; height: number };
+        }): Promise<Uint8Array> => {
+          const shot = await worker.page.screenshot({
+            ...(opts.clip !== undefined ? { clip: opts.clip } : {}),
+            captureBeyondViewport: true,
+          });
+          return new Uint8Array(shot);
+        };
         const result = await Promise.race([
           generateImage(imagePage, request.prompt, request.requestId, {
             stabilizationQuietMs: config.stabilizationQuietMs,

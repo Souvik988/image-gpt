@@ -242,6 +242,16 @@ export interface ImageDriverPage extends ChatDriverPage {
   url(): string;
   /** Optional navigation hook. */
   goto?(url: string, opts?: { waitUntil?: string }): Promise<unknown>;
+  /**
+   * Optional screenshot hook — captures a clipped region of the page as
+   * PNG bytes. Used by the rendered-mockup fallback: ChatGPT sometimes
+   * delivers mockups as live HTML (canvas / iframe) rather than an
+   * image file, in which case the finished render region is captured
+   * directly.
+   */
+  screenshot?(opts: {
+    clip?: { x: number; y: number; width: number; height: number };
+  }): Promise<Uint8Array>;
   /** Optional event subscription — used for network response interception. */
   on?(
     event: 'response',
@@ -315,6 +325,7 @@ export async function generateImage(
   // captures responses that arrive milliseconds after submit.
   const networkCapture = installNetworkInterceptor(page, requestId);
   let recoveryAttempts = 0;
+  let mockupRegionSince: number | null = null;
   const fullPrompt = DALLE_PREFIX + prompt;
 
   try {
@@ -455,7 +466,37 @@ export async function generateImage(
 
       const observed = await readObserverResult(page);
       const domSrc = state?.imageUrl ?? observed?.src ?? (await scanForImage(page, MIN_IMAGE_DIM_PX))?.src ?? null;
-      if (domSrc === null) continue;
+      if (domSrc === null) {
+        // Rendered-mockup fallback: ChatGPT sometimes delivers mockups as
+        // live HTML (canvas / iframe) instead of an image file. Once the
+        // turn is FINISHED and a large render surface has stayed present
+        // for the settle window, capture the region as a PNG.
+        if (
+          state !== null &&
+          state.finished &&
+          typeof page.screenshot === 'function'
+        ) {
+          const region = await locateMockupRegion(page);
+          if (region === null) {
+            mockupRegionSince = null;
+          } else if (mockupRegionSince === null) {
+            mockupRegionSince = now();
+          } else if (now() - mockupRegionSince >= MOCKUP_SETTLE_MS) {
+            const shot = await captureMockupRegion(page, region);
+            if (shot !== null) {
+              logAgentEvent({
+                eventType: 'agent.image_captured',
+                requestId,
+                source: 'mockup-screenshot',
+                bytes: shot.byteLength,
+              });
+              return { ok: true, mediaType: shot.mediaType, base64: shot.base64 };
+            }
+            mockupRegionSince = null;
+          }
+        }
+        continue;
+      }
 
       const fetched = await fetchAndEncode(page, domSrc);
       if (fetched === null) {
@@ -597,6 +638,99 @@ async function clickRetryButton(page: ImageDriverPage): Promise<boolean> {
     });
   } catch {
     return false;
+  }
+}
+
+// ─── Rendered-mockup capture ───────────────────────────────────────────────
+
+/**
+ * Settle window (ms) after the turn reports finished before capturing a
+ * rendered-mockup region — gives the iframe/canvas a beat to paint.
+ */
+const MOCKUP_SETTLE_MS = 4_000;
+
+/**
+ * Locate the largest render surface (iframe / canvas / img / video) in
+ * the LAST assistant turn. Returns document-relative CSS pixels for
+ * page.screenshot's clip, or null when no substantial surface exists.
+ */
+async function locateMockupRegion(
+  page: ImageDriverPage,
+): Promise<{ x: number; y: number; width: number; height: number } | null> {
+  try {
+    return await page.evaluate(
+      (...args: unknown[]):
+        | { x: number; y: number; width: number; height: number }
+        | null => {
+        const minWidth = (args[0] as number) ?? 500;
+        const minHeight = (args[1] as number) ?? 350;
+        const turns = document.querySelectorAll(
+          '[data-message-author-role="assistant"]',
+        );
+        if (turns.length === 0) return null;
+        const last = turns[turns.length - 1];
+        if (last === undefined) return null;
+        const surfaces = last.querySelectorAll('iframe, canvas, img, video');
+        let best: { area: number; x: number; y: number; width: number; height: number } | null = null;
+        for (let i = 0; i < surfaces.length; i += 1) {
+          const el = surfaces[i] as HTMLElement;
+          const rect = el.getBoundingClientRect();
+          const area = rect.width * rect.height;
+          if (rect.width < minWidth || rect.height < minHeight) continue;
+          if (best === null || area > best.area) {
+            best = {
+              area,
+              x: rect.left + window.scrollX,
+              y: rect.top + window.scrollY,
+              width: rect.width,
+              height: rect.height,
+            };
+          }
+        }
+        if (best === null) return null;
+        return {
+          x: Math.round(best.x),
+          y: Math.round(best.y),
+          width: Math.round(best.width),
+          height: Math.round(best.height),
+        };
+      },
+      500,
+      350,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Capture the settled mockup region as PNG bytes.
+ */
+async function captureMockupRegion(
+  page: ImageDriverPage,
+  region: { x: number; y: number; width: number; height: number },
+): Promise<{ mediaType: ImageMime; base64: string; byteLength: number } | null> {
+  if (typeof page.screenshot !== 'function') return null;
+  try {
+    const bytes = await page.screenshot({ clip: region });
+    if (bytes === null || bytes === undefined) return null;
+    const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    if (view.byteLength === 0) return null;
+    if (view.byteLength > MAX_IMAGE_BYTES) {
+      logAgentEvent({
+        eventType: 'agent.error',
+        errorCategory: 'image_too_large',
+        bytes: view.byteLength,
+      });
+      return null;
+    }
+    return {
+      mediaType: 'image/png',
+      base64: encodeBase64(view),
+      byteLength: view.byteLength,
+    };
+  } catch {
+    return null;
   }
 }
 
