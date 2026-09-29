@@ -22,6 +22,7 @@
  */
 
 import type { Browser } from 'puppeteer';
+import * as fsSync from 'node:fs';
 
 /**
  * Launcher abstraction so tests can stub puppeteer without touching the
@@ -106,6 +107,57 @@ async function defaultLauncher(): Promise<Launcher> {
  * Pulled out so tests can inject a synchronous `sleep` and avoid real
  * timers.
  */
+
+/**
+ * Prefer the user's installed Chrome / Edge over puppeteer's downloaded
+ * Chrome-for-Testing build. Google's OAuth refuses sign-in from
+ * automation-flagged CfT builds ("This browser or app may not be
+ * secure"), while the user's real browser carries established trust.
+ * Order: PUPPETEER_EXECUTABLE_PATH env > detected system browser >
+ * undefined (puppeteer's own download).
+ *
+ * Exported for tests; `candidates` is injectable so the probe is
+ * deterministic regardless of the host machine.
+ */
+export function resolveSystemBrowser(
+  candidates: readonly string[] = DEFAULT_BROWSER_CANDIDATES,
+): string | undefined {
+  for (const candidate of candidates) {
+    try {
+      fsSync.accessSync(candidate);
+      return candidate;
+    } catch {
+      // Not installed — try the next candidate.
+    }
+  }
+  return undefined;
+}
+
+const DEFAULT_BROWSER_CANDIDATES: readonly string[] = ((): readonly string[] => {
+  if (process.platform === 'win32') {
+    return [
+      'C:/Program Files/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+      process.env.LOCALAPPDATA !== undefined
+        ? `${process.env.LOCALAPPDATA}/Google/Chrome/Application/chrome.exe`
+        : '',
+      'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    ];
+  }
+  if (process.platform === 'darwin') {
+    return [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    ];
+  }
+  return [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/microsoft-edge',
+    '/usr/bin/chromium-browser',
+  ];
+})();
+
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -215,8 +267,12 @@ export async function launchChromium(opts: LaunchOptions): Promise<Browser> {
   const wantVisible = !headlessMode;
 
   const args: string[] = [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
+    // Linux-only sandbox flags: on Windows/macOS they are no-ops that make
+    // Chrome render an "unsupported command-line flag" warning bar — itself
+    // an automation signal.
+    ...(process.platform === 'linux'
+      ? ['--no-sandbox', '--disable-setuid-sandbox']
+      : []),
     '--disable-blink-features=AutomationControlled',
     ...(wantVisible
       ? [] // visible: no minimization, default window position on-screen
@@ -241,7 +297,7 @@ export async function launchChromium(opts: LaunchOptions): Promise<Browser> {
     ignoreDefaultArgs: ['--enable-automation'],
     defaultViewport: null,
     timeout: timeoutMs, // R8.1
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || resolveSystemBrowser(),
   };
 
   const start: number = now();

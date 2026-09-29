@@ -29,3 +29,6 @@ config-test.log
 
 # Local Kiro MCP settings — contains live secrets. Ship the *.example instead.
 .kiro/settings/mcp.json
+
+# Local runtime scratch (logs, probes, screenshots).
+.run/

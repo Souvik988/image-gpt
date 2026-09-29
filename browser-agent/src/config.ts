@@ -65,7 +65,7 @@ export interface AgentConfig {
    * Number of concurrent ChatGPT tabs (worker agents) driven by this
    * browser-agent process. Each worker owns a page, a FSM, and its own
    * relay socket connection, so the relay's dispatcher sees N agents and
-   * parallelises across tabs automatically. Range 1..8, default 2.
+   * parallelises across tabs automatically. Range 1..8, default 1.
    */
   readonly workerCount: number;
 }
@@ -337,7 +337,7 @@ export function loadConfig(
     env.AGENT_WORKERS,
     1,
     8,
-    2,
+    1,
     deps,
   );
   return {

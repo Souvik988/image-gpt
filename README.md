@@ -193,7 +193,7 @@ Any invalid value causes the relay to log a structured error identifying the var
 | `RELAY_URL` | URL of the relay server | — (required) | `ws://` or `wss://` URL |
 | `AGENT_SECRET` | Shared secret matching the relay's `AGENT_SECRET` | — (required) | string, 16–256 chars |
 | `AGENT_PROFILE_DIR` | Absolute path to the persistent Chromium profile | — (required) | absolute path that exists and is writable |
-| `AGENT_WORKERS` | Number of concurrent ChatGPT tabs (worker agents) driven by this process; each worker owns a page, a FSM, and its own relay socket so the relay parallelises dispatch across tabs | `2` | integer, 1–8 |
+| `AGENT_WORKERS` | Number of concurrent ChatGPT tabs (worker agents) driven by this process; each worker owns a page, a FSM, and its own relay socket so the relay parallelises dispatch across tabs | `1` | integer, 1–8 |
 | `AGENT_TYPING_MODE` | Typing strategy for the chat driver: `fast` inserts the whole prompt in one in-page call (~10–50 ms regardless of length), `human` synthesizes per-keystroke 20–80 ms jitter | `fast` | `fast` or `human` |
 | `AGENT_STABILIZATION_MS` | Adaptive image-stabilization quiet window: after each larger network capture, wait this long for a higher-quality replacement before returning the best image | `2500` | integer, 0–120000 |
 | `AGENT_NEW_CHAT_PER_REQUEST` | Navigate to a fresh chat before each dispatched request (keeps conversations short and makes stream baselining trivially correct) | `true` | boolean (`true`/`false`/`1`/`0`) |

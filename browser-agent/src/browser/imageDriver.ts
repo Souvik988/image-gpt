@@ -314,6 +314,8 @@ export async function generateImage(
   // Step 3: install the network interceptor BEFORE submission so it
   // captures responses that arrive milliseconds after submit.
   const networkCapture = installNetworkInterceptor(page, requestId);
+  let recoveryAttempts = 0;
+  const fullPrompt = DALLE_PREFIX + prompt;
 
   try {
     // Step 4: submit the prompt with the image directive prefix.
@@ -324,7 +326,7 @@ export async function generateImage(
     });
     const submission = await typeAndSubmitChat(
       page,
-      DALLE_PREFIX + prompt,
+      fullPrompt,
       requestId,
       { sleep },
     );
@@ -399,6 +401,53 @@ export async function generateImage(
         return { ok: false, errorCode: 'CONTENT_POLICY', message: state.errorText };
       }
 
+      // Failure recovery (self-healing): ChatGPT sometimes fails
+      // mid-generation and renders an "Image generation failed" card
+      // with a "Try again" button. Click it when present; otherwise
+      // re-submit the prompt from scratch. Bounded — after
+      // MAX_IMAGE_RECOVERY_ATTEMPTS the request fails instead of
+      // spinning until the deadline.
+      const probe = await probeImageFailure(page);
+      if (probe !== null && probe.failed) {
+        if (recoveryAttempts >= MAX_IMAGE_RECOVERY_ATTEMPTS) {
+          logAgentEvent({
+            eventType: 'agent.error',
+            errorCategory: 'image_recovery_exhausted',
+            requestId,
+            attempts: recoveryAttempts,
+          });
+          return {
+            ok: false,
+            errorCode: 'CHATGPT_ERROR',
+            message: 'image generation failed after ' + recoveryAttempts + ' recovery attempts',
+          };
+        }
+        recoveryAttempts += 1;
+        let recovered = false;
+        let strategy: 'retry_button' | 'resubmit' = 'resubmit';
+        if (probe.canRetry) {
+          strategy = 'retry_button';
+          recovered = await clickRetryButton(page);
+        }
+        if (!recovered) {
+          const resubmitted = await typeAndSubmitChat(page, fullPrompt, requestId, { sleep });
+          recovered = resubmitted.ok;
+        }
+        logAgentEvent({
+          eventType: 'agent.image_recovery',
+          requestId,
+          attempt: recoveryAttempts,
+          strategy,
+          ok: recovered,
+        });
+        if (recovered) {
+          // New attempt: restart the stabilization clock so the quiet
+          // window measures freshness of the NEXT capture.
+          lastImprovementAt = null;
+          continue;
+        }
+      }
+
       // DOM fallback — only used if no network candidate is available.
       // If we already have a network hit in stabilization, skip DOM
       // scanning to avoid returning a lower-quality DOM-fetched version.
@@ -453,6 +502,101 @@ export async function generateImage(
     };
   } finally {
     networkCapture.dispose();
+  }
+}
+
+// ─── Failure recovery (self-healing) ────────────────────────────────────────
+
+/**
+ * Text markers ChatGPT renders when an image generation fails
+ * ("Image generation failed" card with a Try again button).
+ */
+const IMAGE_FAILURE_MARKERS = [
+  'image generation failed',
+  'cannot generate image',
+  'unable to generate the image',
+  "couldn't generate the image",
+  'something went wrong while generating',
+] as const;
+
+/**
+ * Bounded recovery attempts per image request. Each attempt either
+ * clicks ChatGPT's "Try again" button or, when no button is present,
+ * re-submits the prompt from scratch.
+ */
+const MAX_IMAGE_RECOVERY_ATTEMPTS = 2;
+
+/** Shape returned by {@link probeImageFailure}. */
+interface ImageFailureProbe {
+  failed: boolean;
+  canRetry: boolean;
+}
+
+/**
+ * One-round-trip probe: does the LAST assistant turn carry a generation
+ * failure, and is a "Try again" / "Retry" button present? Scoped to the
+ * last turn so old failures never trigger recovery.
+ */
+async function probeImageFailure(
+  page: ImageDriverPage,
+): Promise<ImageFailureProbe | null> {
+  try {
+    return await page.evaluate(
+      (...args: unknown[]): ImageFailureProbe => {
+        const markers = args[0] as string[];
+        const turns = document.querySelectorAll(
+          '[data-message-author-role="assistant"]',
+        );
+        let failed = false;
+        if (turns.length > 0) {
+          const last = turns[turns.length - 1] as HTMLElement;
+          const text = (last.innerText || '').toLowerCase();
+          for (const marker of markers) {
+            if (text.includes(marker)) {
+              failed = true;
+              break;
+            }
+          }
+        }
+        if (!failed) return { failed: false, canRetry: false };
+        let canRetry = false;
+        const buttons = document.querySelectorAll('button');
+        for (let i = 0; i < buttons.length; i += 1) {
+          const label = ((buttons[i] as HTMLElement).innerText || '').trim().toLowerCase();
+          if (label === 'try again' || label === 'retry') {
+            canRetry = true;
+            break;
+          }
+        }
+        return { failed: true, canRetry };
+      },
+      IMAGE_FAILURE_MARKERS,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Click ChatGPT's visible "Try again" / "Retry" button (matched by
+ * visible text so class-name churn cannot break it).
+ */
+async function clickRetryButton(page: ImageDriverPage): Promise<boolean> {
+  try {
+    return await page.evaluate((): boolean => {
+      const buttons = document.querySelectorAll('button');
+      for (let i = 0; i < buttons.length; i += 1) {
+        const button = buttons[i] as HTMLElement;
+        const label = (button.innerText || '').trim().toLowerCase();
+        if (label === 'try again' || label === 'retry') {
+          button.click();
+          return true;
+        }
+      }
+      return false;
+    });
+  } catch {
+    return false;
   }
 }
 

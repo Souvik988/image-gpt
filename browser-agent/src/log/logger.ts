@@ -49,6 +49,7 @@ export type AgentEventType =
   | 'agent.chat_submit'
   | 'agent.image_submit'
   | 'agent.image_captured'
+  | 'agent.image_recovery'
   | 'agent.stream_chunk_emitted'
   | 'agent.cancel_received'
   | 'agent.cancel_executed'

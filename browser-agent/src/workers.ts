@@ -85,6 +85,17 @@ const WORKER_NAVIGATION_TIMEOUT_MS = 60_000;
 const MAX_RELAUNCH_ATTEMPTS = 4;
 
 /**
+ * Dispatch-level hard deadlines. The drivers carry their own internal
+ * deadlines (image 600 s, stream idle 120 s) but a CDP evaluate that
+ * never settles (page navigated/crashed mid-call) would hang the driver
+ * past them — a hung await never rejects, so the worker would stay
+ * `busy` forever. These outer deadlines guarantee every dispatch ends
+ * and frees its worker.
+ */
+const IMAGE_HARD_DEADLINE_MS = 660_000;
+const CHAT_HARD_DEADLINE_MS = 900_000;
+
+/**
  * Cross-platform shutdown helper: force-kill the Chromium process tree
  * when a graceful `browser.close()` hangs (Windows leaves orphaned
  * chrome.exe processes behind otherwise). Kept from the original
@@ -283,9 +294,18 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
         // narrow via an `unknown` hop instead of polluting the driver's
         // surface with puppeteer's exact lifecycle enum.
         const imagePage = worker.page as unknown as ImageDriverPage;
-        const result = await generateImage(imagePage, request.prompt, request.requestId, {
-          stabilizationQuietMs: config.stabilizationQuietMs,
-        });
+        const result = await Promise.race([
+          generateImage(imagePage, request.prompt, request.requestId, {
+            stabilizationQuietMs: config.stabilizationQuietMs,
+          }),
+          new Promise<never>((_, reject) => {
+            const t = setTimeout(
+              () => reject(new Error('image hard deadline exceeded')),
+              IMAGE_HARD_DEADLINE_MS,
+            );
+            t.unref?.();
+          }),
+        ]);
         if (aborted) {
           worker.relay.emitChunk(buildCancelledChunk(request.requestId, '', 0));
         } else if (result.ok) {
@@ -302,7 +322,13 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
           worker.relay.emitFailure(request.requestId, result.errorCode, result.message);
         }
       } else {
-        const baseline = await captureBaseline(worker.page);
+        const baseline = await Promise.race([
+          captureBaseline(worker.page),
+          new Promise<null>((resolve) => {
+            const t = setTimeout(() => resolve(null), 30_000);
+            t.unref?.();
+          }),
+        ]);
         if (baseline === null) {
           worker.relay.emitFailure(
             request.requestId,
@@ -318,18 +344,32 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
           const code: ErrorCode = submission.errorCode ?? 'CHATGPT_UNAVAILABLE';
           worker.relay.emitFailure(request.requestId, code, submission.message);
         } else {
-          for await (const event of extractStream(worker.page, request.requestId, baseline, {
-            idleTimeoutMs: config.streamIdleTimeoutMs,
-            totalTimeoutMs: config.streamTotalTimeoutMs,
-          })) {
-            if (aborted) break;
-            if (event.kind === 'chunk' || event.kind === 'final') {
-              worker.relay.emitChunk(event.chunk);
-            } else {
-              worker.relay.emitFailure(request.requestId, event.errorCode, event.message);
-              break;
+          // Hard deadline: a hung CDP await inside the extractor would
+          // otherwise keep the worker busy forever. The consuming closure
+          // races against a rejecting timer; on deadline the catch below
+          // surfaces CHAT_TIMEOUT and the worker is freed.
+          const streamDeadline = new Promise<never>((_, reject) => {
+            const t = setTimeout(
+              () => reject(new Error('chat hard deadline exceeded')),
+              CHAT_HARD_DEADLINE_MS,
+            );
+            t.unref?.();
+          });
+          const consumeStream = async (): Promise<void> => {
+            for await (const event of extractStream(worker.page, request.requestId, baseline, {
+              idleTimeoutMs: config.streamIdleTimeoutMs,
+              totalTimeoutMs: config.streamTotalTimeoutMs,
+            })) {
+              if (aborted) break;
+              if (event.kind === 'chunk' || event.kind === 'final') {
+                worker.relay.emitChunk(event.chunk);
+              } else {
+                worker.relay.emitFailure(request.requestId, event.errorCode, event.message);
+                break;
+              }
             }
-          }
+          };
+          await Promise.race([consumeStream(), streamDeadline]);
           if (aborted) {
             // Cancellation interrupted mid-stream; emit the terminal
             // cancelled chunk so the relay fans it to the client.
