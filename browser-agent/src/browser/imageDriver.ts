@@ -326,6 +326,9 @@ export async function generateImage(
   const networkCapture = installNetworkInterceptor(page, requestId);
   let recoveryAttempts = 0;
   let mockupRegionSince: number | null = null;
+  let lastRegionKey: string | null = null;
+  let regionStableCount = 0;
+  let submittedAtMs = 0;
   const fullPrompt = DALLE_PREFIX + prompt;
 
   try {
@@ -348,6 +351,7 @@ export async function generateImage(
         message: submission.message,
       };
     }
+    submittedAtMs = now();
 
     // Step 5: install the in-page MutationObserver as fallback. Errors
     // here are non-fatal; the per-tick last-turn scan still works.
@@ -466,45 +470,66 @@ export async function generateImage(
 
       const observed = await readObserverResult(page);
       const domSrc = state?.imageUrl ?? observed?.src ?? (await scanForImage(page, MIN_IMAGE_DIM_PX))?.src ?? null;
-      if (domSrc === null) {
-        // Rendered-mockup fallback: ChatGPT sometimes delivers mockups as
-        // live HTML (canvas / iframe) instead of an image file. Once the
-        // turn is FINISHED and a large render surface has stayed present
-        // for the settle window, capture the region as a PNG.
-        if (
-          state !== null &&
-          state.finished &&
-          typeof page.screenshot === 'function'
-        ) {
-          const region = await locateMockupRegion(page);
-          if (region === null) {
-            mockupRegionSince = null;
-          } else if (mockupRegionSince === null) {
-            mockupRegionSince = now();
-          } else if (now() - mockupRegionSince >= MOCKUP_SETTLE_MS) {
-            const shot = await captureMockupRegion(page, region);
-            if (shot !== null) {
-              logAgentEvent({
-                eventType: 'agent.image_captured',
-                requestId,
-                source: 'mockup-screenshot',
-                bytes: shot.byteLength,
-              });
-              return { ok: true, mediaType: shot.mediaType, base64: shot.base64 };
-            }
-            mockupRegionSince = null;
+
+      // Rendered-mockup fallback. ChatGPT increasingly delivers mockups as
+      // live HTML (canvas / iframe) — or as images whose in-page fetch
+      // fails — with no downloadable file on the wire. When the last turn
+      // holds a large render surface that has kept the SAME geometry for
+      // several polls (stable render), and the turn is not mid-stream,
+      // capture the region as a PNG screenshot. This path also catches
+      // the fetch-failure case above so the loop cannot spin forever on
+      // an unfetchable <img>.
+      const fetched = domSrc === null ? null : await fetchAndEncode(page, domSrc);
+      if (fetched === null) {
+        if (typeof page.screenshot !== 'function' || state === null || state.stopVisible) {
+          if (domSrc !== null) {
+            await clearObserverResult(page);
           }
+          continue;
+        }
+        const region = await locateMockupRegion(page);
+        const regionKey =
+          region === null
+            ? null
+            : region.x + ',' + region.y + ',' + region.width + ',' + region.height;
+        if (regionKey === null || regionKey !== lastRegionKey) {
+          lastRegionKey = regionKey;
+          regionStableCount = 0;
+          mockupRegionSince = regionKey === null ? null : now();
+        } else {
+          regionStableCount += 1;
+        }
+        const agedEnough = now() - submittedAtMs >= MOCKUP_MIN_AGE_MS;
+        if (
+          region !== null &&
+          regionStableCount >= MOCKUP_STABLE_POLLS &&
+          agedEnough &&
+          now() - (mockupRegionSince ?? now()) >= MOCKUP_SETTLE_MS
+        ) {
+          const shot = await captureMockupRegion(page, region);
+          if (shot !== null) {
+            logAgentEvent({
+              eventType: 'agent.image_captured',
+              requestId,
+              source: 'mockup-screenshot',
+              bytes: shot.byteLength,
+            });
+            return { ok: true, mediaType: shot.mediaType, base64: shot.base64 };
+          }
+          // Screenshot failed — reset stability so we retry after the
+          // surface re-stabilizes instead of hammering every cycle.
+          regionStableCount = 0;
+          mockupRegionSince = now();
+        }
+        if (domSrc !== null) {
+          // The <img> fetch failed and the surface is not (yet) stable
+          // enough to screenshot — clear observer state and keep polling.
+          await clearObserverResult(page);
         }
         continue;
       }
-
-      const fetched = await fetchAndEncode(page, domSrc);
-      if (fetched === null) {
-        await clearObserverResult(page);
-        continue;
-      }
-      const mediaType = normalizeMime(fetched.mime);
-      if (mediaType === null) {
+      const domMime = normalizeMime(fetched.mime);
+      if (domMime === null) {
         await clearObserverResult(page);
         continue;
       }
@@ -514,7 +539,7 @@ export async function generateImage(
         source: 'dom',
         bytes: Math.floor((fetched.base64.length * 3) / 4),
       });
-      return { ok: true, mediaType, base64: fetched.base64 };
+      return { ok: true, mediaType: domMime, base64: fetched.base64 };
     }
 
     // If we captured at least one network image but the quiet window
@@ -644,10 +669,14 @@ async function clickRetryButton(page: ImageDriverPage): Promise<boolean> {
 // ─── Rendered-mockup capture ───────────────────────────────────────────────
 
 /**
- * Settle window (ms) after the turn reports finished before capturing a
- * rendered-mockup region — gives the iframe/canvas a beat to paint.
+ * Rendered-mockup capture tuning: the region must keep identical
+ * geometry for MOCKUP_STABLE_POLLS consecutive polls, the request must
+ * be at least MOCKUP_MIN_AGE_MS old, and the region must have been
+ * stable for MOCKUP_SETTLE_MS before the PNG capture fires.
  */
-const MOCKUP_SETTLE_MS = 4_000;
+const MOCKUP_STABLE_POLLS = 3;
+const MOCKUP_MIN_AGE_MS = 45_000;
+const MOCKUP_SETTLE_MS = 6_000;
 
 /**
  * Locate the largest render surface (iframe / canvas / img / video) in

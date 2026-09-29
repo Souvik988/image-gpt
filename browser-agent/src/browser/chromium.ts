@@ -297,7 +297,11 @@ export async function launchChromium(opts: LaunchOptions): Promise<Browser> {
     // Drop the --enable-automation default switch: Google's OAuth refuses
     // sign-in from browsers carrying it ("This browser or app may not be
     // secure"). Stealth already patches navigator.webdriver JS-side.
-    ignoreDefaultArgs: ['--enable-automation'],
+    // Both switches trigger Chrome's "unsupported command-line flag"
+    // warning bar (an automation signal). navigator.webdriver is patched
+    // JS-side by puppeteer-extra-stealth, so dropping the blink flag is
+    // safe.
+    ignoreDefaultArgs: ['--enable-automation', '--disable-blink-features=AutomationControlled'],
     defaultViewport: null,
     timeout: timeoutMs, // R8.1
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || resolveSystemBrowser(),
