@@ -59,6 +59,13 @@ import type { ErrorCode, RequestId } from '@kiro-gpt-bridge/shared';
  */
 const DALLE_PREFIX = 'Generate an image: ';
 
+/**
+ * Directive prefix used when a reference image is attached — instructs
+ * ChatGPT to treat the upload as the visual source to recreate.
+ */
+const REFERENCE_PREFIX =
+  'Using the attached reference image, generate a new image: ';
+
 /** Maximum prompt length accepted by the image path. R10.7. */
 const MAX_PROMPT_LEN = 4000;
 
@@ -173,6 +180,12 @@ export interface ImageDriverOptions {
    * treated as this request's.
    */
   baselineTurnCount?: number;
+  /**
+   * Reference images to upload into the composer before the prompt is
+   * typed (Phase 8 reference pipeline). Decoded to temp files by the
+   * worker; the driver only forwards their paths.
+   */
+  attachments?: Array<{ filename: string; path: string }>;
   /** Sleep injection for tests. Default `setTimeout`-based. */
   sleep?: (ms: number) => Promise<void>;
   /** Clock injection for tests. Default `Date.now`. */
@@ -252,6 +265,13 @@ export interface ImageDriverPage extends ChatDriverPage {
   screenshot?(opts: {
     clip?: { x: number; y: number; width: number; height: number };
   }): Promise<Uint8Array>;
+  /**
+   * Optional file-upload hook — sets the given local files on the
+   * composer's hidden file input so ChatGPT receives them as
+   * attachments. Implemented by the worker with puppeteer's
+   * uploadFile (CDP DOM.setFileInputFiles).
+   */
+  uploadFiles?(paths: string[]): Promise<boolean>;
   /** Optional event subscription — used for network response interception. */
   on?(
     event: 'response',
@@ -325,11 +345,38 @@ export async function generateImage(
   // captures responses that arrive milliseconds after submit.
   const networkCapture = installNetworkInterceptor(page, requestId);
   let recoveryAttempts = 0;
+  let lastDebugLogAt = 0;
   let mockupRegionSince: number | null = null;
   let lastRegionKey: string | null = null;
   let regionStableCount = 0;
   let submittedAtMs = 0;
-  const fullPrompt = DALLE_PREFIX + prompt;
+
+  // Reference attachments: upload into the composer BEFORE typing so
+  // the generation sees the reference image alongside the prompt.
+  let referenceAttached = false;
+  if (
+    opts.attachments !== undefined &&
+    opts.attachments.length > 0 &&
+    typeof page.uploadFiles === 'function'
+  ) {
+    try {
+      referenceAttached = await page.uploadFiles(
+        opts.attachments.map((a) => a.path),
+      );
+    } catch {
+      referenceAttached = false;
+    }
+    logAgentEvent({
+      eventType: 'agent.attachment_uploaded',
+      requestId,
+      count: opts.attachments.length,
+      ok: referenceAttached,
+    });
+  }
+  const prefix = referenceAttached
+    ? REFERENCE_PREFIX
+    : DALLE_PREFIX;
+  const fullPrompt = prefix + prompt;
 
   try {
     // Step 4: submit the prompt with the image directive prefix.
@@ -467,6 +514,19 @@ export async function generateImage(
       // If we already have a network hit in stabilization, skip DOM
       // scanning to avoid returning a lower-quality DOM-fetched version.
       if (bestNetHit !== null) continue;
+
+      if (now() - lastDebugLogAt >= 15_000) {
+        lastDebugLogAt = now();
+        logAgentEvent({
+          eventType: 'agent.image_debug',
+          requestId,
+          elapsedMs: now() - startedAt,
+          turnCount: state?.turnCount ?? -1,
+          stopVisible: state?.stopVisible ?? null,
+          textLen: state?.text.length ?? -1,
+          netHits: bestNetHit === null ? 0 : 1,
+        });
+      }
 
       const observed = await readObserverResult(page);
       const domSrc = state?.imageUrl ?? observed?.src ?? (await scanForImage(page, MIN_IMAGE_DIM_PX))?.src ?? null;
@@ -714,6 +774,26 @@ async function locateMockupRegion(
               width: rect.width,
               height: rect.height,
             };
+          }
+        }
+        if (best === null) {
+          // Document-wide fallback: mockup canvases sometimes render in
+          // containers outside the assistant-turn element.
+          const anySurface = document.querySelectorAll('iframe, canvas, video');
+          for (let i = 0; i < anySurface.length; i += 1) {
+            const el = anySurface[i] as HTMLElement;
+            const rect = el.getBoundingClientRect();
+            const area = rect.width * rect.height;
+            if (rect.width < minWidth || rect.height < minHeight) continue;
+            if (best === null || area > best.area) {
+              best = {
+                area,
+                x: rect.left + window.scrollX,
+                y: rect.top + window.scrollY,
+                width: rect.width,
+                height: rect.height,
+              };
+            }
           }
         }
         if (best === null) return null;

@@ -14,6 +14,7 @@ import * as fsp from 'node:fs/promises';
 import {
   base64Decode,
   type AssetCategory,
+  type Attachment,
   type ErrorCode,
   type Request,
   type StreamChunk,
@@ -311,7 +312,10 @@ export async function atomicWrite(
  * operators distinguish MCP-tool-driven traffic from panel and API
  * generation paths in a single log stream.
  */
-export function buildImageRequest(prompt: string): Request {
+export function buildImageRequest(
+  prompt: string,
+  attachments?: Attachment[],
+): Request {
   return {
     protocolVersion: 1,
     requestId: randomUUID(),
@@ -319,6 +323,9 @@ export function buildImageRequest(prompt: string): Request {
     sessionId: 'mcp',
     type: 'image',
     prompt,
+    ...(attachments !== undefined && attachments.length > 0
+      ? { attachments }
+      : {}),
     submittedAt: Date.now(),
     origin: 'mcp',
   };
@@ -540,13 +547,20 @@ export function readPolicyRetryBudget(): number {
  * {@link mapRelayError}; a failed rephrase degrades to the original
  * refusal chunk (the caller surfaces it unchanged).
  */
+/** Options for {@link submitImageRequest}. */
+export interface SubmitImageOptions {
+  /** Reference images attached to the request (Phase 8). */
+  attachments?: Attachment[];
+}
+
 export async function submitImageRequest(
   ctx: McpToolContext,
   prompt: string,
+  opts: SubmitImageOptions = {},
 ): Promise<SubmitImageSuccess | McpFailure> {
   const budget = readPolicyRetryBudget();
 
-  const request = buildImageRequest(prompt);
+  const request = buildImageRequest(prompt, opts.attachments);
   let finalChunk: StreamChunk;
   try {
     finalChunk = await ctx.relayClient.submitAndAwait(request);
@@ -575,7 +589,7 @@ export async function submitImageRequest(
     };
   }
 
-  const retryRequest = buildImageRequest(rewritten);
+  const retryRequest = buildImageRequest(rewritten, opts.attachments);
   try {
     finalChunk = await ctx.relayClient.submitAndAwait(retryRequest);
   } catch (err) {

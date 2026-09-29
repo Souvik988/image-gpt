@@ -35,6 +35,10 @@
  * @packageDocumentation
  */
 
+import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 import type { Browser, Page } from 'puppeteer';
 import type {
   Request,
@@ -60,6 +64,7 @@ import {
   performStopAction,
   buildCancelledChunk,
 } from './browser/stopAction.js';
+import { tryPassCloudflare, isChallengeTitle } from './browser/cloudflare.js';
 import { createRelayClient, type RelayClient } from './socket/relayClient.js';
 
 /**
@@ -246,6 +251,11 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
         waitUntil: 'domcontentloaded',
         timeout: NEW_CHAT_NAVIGATION_TIMEOUT_MS,
       });
+      if (isChallengeTitle(await worker.page.title().catch(() => ''))) {
+        logAgentEvent({ eventType: 'agent.cloudflare', stage: 'challenge_detected', worker: worker.index, scope: 'new_chat' });
+        const passed = await tryPassCloudflare(worker.page, { maxAttempts: 6 });
+        logAgentEvent({ eventType: 'agent.cloudflare', stage: passed ? 'passed' : 'persisted', worker: worker.index, scope: 'new_chat' });
+      }
       logAgentEvent({ eventType: 'agent.new_chat', worker: worker.index });
     } catch (e) {
       logAgentEvent({
@@ -279,6 +289,7 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
     worker.relay.emitAck(request.requestId);
 
     let aborted = false;
+    let attachmentDir: string | null = null;
     worker.inflight.set(request.requestId, {
       abort: (): void => {
         aborted = true;
@@ -305,9 +316,37 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
           });
           return new Uint8Array(shot);
         };
+        // Decode request attachments to temp files and expose the
+        // composer file-input upload to the driver (Phase 8 references).
+        attachmentDir = path.join(
+          os.tmpdir(),
+          'kiro-gpt-attachments',
+          request.requestId,
+        );
+        const attachmentFiles: Array<{ filename: string; path: string }> = [];
+        if (request.attachments !== undefined && request.attachments.length > 0) {
+          await fsp.mkdir(attachmentDir, { recursive: true });
+          for (const att of request.attachments) {
+            const safeName = att.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+            const filePath = path.join(attachmentDir, safeName);
+            await fsp.writeFile(filePath, Buffer.from(att.base64, 'base64'));
+            attachmentFiles.push({ filename: att.filename, path: filePath });
+          }
+        }
+        (imagePage as { uploadFiles?: unknown }).uploadFiles = async (
+          paths: string[],
+        ): Promise<boolean> => {
+          const inputs = await worker.page.$$('input[type="file"]');
+          if (inputs.length === 0) return false;
+          const handle = inputs[0];
+          if (handle === null || handle === undefined) return false;
+          await handle.uploadFile(...paths);
+          return true;
+        };
         const result = await Promise.race([
           generateImage(imagePage, request.prompt, request.requestId, {
             stabilizationQuietMs: config.stabilizationQuietMs,
+            attachments: attachmentFiles,
           }),
           new Promise<never>((_, reject) => {
             const t = setTimeout(
@@ -398,6 +437,11 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
       });
       worker.relay.emitFailure(request.requestId, 'CHATGPT_UNAVAILABLE', String(e));
     } finally {
+      if (attachmentDir !== null) {
+        void fsp
+          .rm(attachmentDir, { recursive: true, force: true })
+          .catch(() => undefined);
+      }
       worker.inflight.delete(request.requestId);
       // The FSM may already be back in `ready` (e.g. a chromium crash
       // mid-dispatch tripped the `restarting` path); the safe transition
@@ -446,6 +490,20 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
       timeout: WORKER_NAVIGATION_TIMEOUT_MS,
     });
 
+    // Cloudflare interstitial: fresh launches are commonly challenged.
+    // Click the Turnstile checkbox (bounded attempts) before auth
+    // detection — a stuck challenge page leaves the worker in `booting`
+    // forever.
+    for (let bootCheck = 0; bootCheck < 3; bootCheck += 1) {
+      const title = await page.title().catch(() => '');
+      if (!isChallengeTitle(title)) break;
+      logAgentEvent({ eventType: 'agent.cloudflare', stage: 'challenge_detected', worker: index, scope: 'boot' });
+      const passed = await tryPassCloudflare(page, { maxAttempts: 4, attemptDelayMs: 2_000 });
+      logAgentEvent({ eventType: 'agent.cloudflare', stage: passed ? 'passed' : 'persisted', worker: index, scope: 'boot' });
+      if (passed) break;
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+    }
+
     const fsm = createAgentStateMachine();
     const worker: Worker = {
       index,
@@ -472,7 +530,32 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
     // `unknown` deliberately falls through: the poller below fires its
     // first observation almost immediately and drives the FSM then.
 
-    worker.poller = startAuthPoller(page, (state) => handleAuthChange(worker, state));
+    // Cloudflare challenges can appear AFTER boot (slow challenge load,
+    // mid-session re-checks). Whenever the auth poller reports `unknown`
+    // — neither composer nor login button visible — attempt the Turnstile
+    // click, throttled so we never hammer the widget.
+    let lastChallengeAttempt = 0;
+    worker.poller = startAuthPoller(page, (state) => {
+      if (state === 'unknown') {
+        const nowMs = Date.now();
+        if (nowMs - lastChallengeAttempt > 15_000) {
+          lastChallengeAttempt = nowMs;
+          void tryPassCloudflare(page, { maxAttempts: 3, attemptDelayMs: 1_500 })
+            .then((passed) => {
+              if (passed) {
+                logAgentEvent({
+                  eventType: 'agent.cloudflare',
+                  stage: 'passed',
+                  worker: index,
+                  scope: 'poller',
+                });
+              }
+            })
+            .catch(() => undefined);
+        }
+      }
+      handleAuthChange(worker, state);
+    });
 
     // Register handlers BEFORE `relay.start()` so the very first dispatch
     // arriving on register cannot race the listener attach.

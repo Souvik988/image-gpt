@@ -65,6 +65,8 @@ import { generateBanner } from './tools/generateBanner.js';
 import { generateOgImage } from './tools/generateOgImage.js';
 import { generateIcon3d } from './tools/generateIcon3d.js';
 import { analyzeDesign } from './tools/analyzeDesign.js';
+import { decomposeReference } from './tools/decomposeReference.js';
+import { generateFromReference } from './tools/generateFromReference.js';
 import type { McpToolContext } from './tools/common.js';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
@@ -344,6 +346,45 @@ const TOOLS = [
     },
   },
   {
+    name: 'decompose_reference',
+    description:
+      'Deterministic local slicing of a large reference sheet (7x4 page mockups etc.) into pixel-exact page crops — no ChatGPT round-trip. Crops land in <workspace>/reference/pages/ immediately.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        reference_path: { type: 'string', minLength: 1 },
+        rows: { type: 'number' },
+        cols: { type: 'number' },
+        max_pages: { type: 'number' },
+        workspace_root: { type: 'string' },
+      },
+      required: ['reference_path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'generate_from_reference',
+    description:
+      'Full reference-decomposition pipeline: slice the sheet into pages, then per page recreate the mockup with the crop ATTACHED so ChatGPT sees the reference, then extract each element (logo, nav, buttons, icons...) as standalone PNGs at requested sizes. Every asset is written the moment its bytes arrive.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        reference_path: { type: 'string', minLength: 1 },
+        rows: { type: 'number' },
+        cols: { type: 'number' },
+        max_pages: { type: 'number' },
+        workspace_root: { type: 'string' },
+        framework: { type: 'string', enum: ['next', 'nuxt', 'sveltekit', 'vite', 'angular', 'cra', 'unknown'] },
+        generate_elements: { type: 'boolean' },
+        elements: { type: 'array', items: { type: 'string' } },
+        element_size: { type: 'string' },
+        element_scale: { type: 'string', enum: ['1x', '2x', 'both'] },
+      },
+      required: ['reference_path'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'analyze_design',
     description:
       'Read-only UI analysis: scans the workspace (framework, Tailwind config, CSS custom properties, package.json) and returns the distilled design system (colors, fonts, radii, stack, dark mode) as JSON plus a one-line design brief. Use this to understand the UI before composing generation briefs.',
@@ -487,6 +528,12 @@ async function main(): Promise<void> {
         break;
       case 'analyze_design':
         result = await analyzeDesign(args, ctx);
+        break;
+      case 'decompose_reference':
+        result = await decomposeReference(args, ctx);
+        break;
+      case 'generate_from_reference':
+        result = await generateFromReference(args, ctx);
         break;
       default:
         log('warn', 'mcp_unknown_tool', { tool: toolName });

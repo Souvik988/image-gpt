@@ -15,10 +15,14 @@
   "dependencies": {
     "@kiro-gpt-bridge/shared": "*",
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "jpeg-js": "^0.4.4",
+    "pngjs": "^7.0.0",
     "socket.io-client": "^4.7.5",
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@types/node": "^20.12.0"
+    "@types/jpeg-js": "^0.3.0",
+    "@types/node": "^20.12.0",
+    "@types/pngjs": "^6.0.5"
   }
 }
