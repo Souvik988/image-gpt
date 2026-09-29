@@ -33,6 +33,33 @@ success or `{ ok: false, errorCode, message }` on failure.
     matches the mockup).
 - **`generate_image`** — `{ prompt, asset_category?, filename?, framework?, workspace_root?, overwrite? }`
   - General-purpose fallback when no specialized tool fits.
+- **`generate_banner`** — `{ description, size?, style?, framework?, workspace_root?, overwrite?, cache? }`
+  - Website banner / ad-unit graphics. `size` presets: `leaderboard` (728x90),
+    `medium_rectangle` (300x250), `wide_skyscraper` (160x600), `billboard`
+    (970x250), `hero_wide` (1600x500). Saves under the framework's `hero/`
+    folder.
+- **`generate_og_image`** — `{ description, style?, framework?, workspace_root?, overwrite?, cache? }`
+  - 1200x630 Open Graph / social card with headline-safe negative space; the
+    prompt forbids embedded text because real text is overlaid in code. Save
+    stem is `og-image` — reference it from `<meta property="og:image">`.
+- **`generate_icon_3d`** — `{ subject, style?, framework?, workspace_root?, overwrite?, cache? }`
+  - Single 3D-rendered icon (studio lighting, soft materials). Saves into the
+    framework's `icons/` folder with an `icon3d-` stem.
+- **`analyze_design`** — `{ workspace_root? }`
+  - Read-only UI understanding: returns the workspace's design system
+    (framework, brand hint, colors, fonts, radii, stack, dark mode) plus a
+    one-line `designBrief`. Call it FIRST when a user asks for assets that
+    should match their existing UI — every generation prompt already embeds
+    this brief automatically, so assets inherit the project's palette and
+    typography without extra work.
+
+All single-asset tools accept `cache` (default `true`): an identical prompt in
+an unchanged design system resolves instantly from
+`<workspace>/.kiro-gpt-cache.json` instead of regenerating. Pass
+`cache: false` to force a fresh generation.
+
+On a content-policy refusal, the server automatically asks ChatGPT to rewrite
+the prompt policy-safe and retries once (`KIRO_GPT_MCP_POLICY_RETRIES`, default 1).
 
 `workspace_root` is rarely needed; when omitted, the MCP server falls
 back to the `KIRO_GPT_MCP_WORKSPACE` environment variable resolved at

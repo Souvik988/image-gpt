@@ -45,6 +45,7 @@ export type AgentEventType =
   | 'agent.relay_disconnected'
   | 'agent.heartbeat_emitted'
   | 'agent.dispatch_received'
+  | 'agent.new_chat'
   | 'agent.chat_submit'
   | 'agent.image_submit'
   | 'agent.image_captured'

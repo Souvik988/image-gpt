@@ -23,6 +23,7 @@ Then follow [Run Locally](#run-locally) to start the relay, the browser-agent, a
 ## Table of Contents
 
 - [Architecture](#architecture)
+- [Architecture upgrades (Phase 2–6 rebuild)](#architecture-upgrades-phase-26-rebuild)
 - [Repository Layout](#repository-layout)
 - [Run Locally](#run-locally)
 - [Environment Variables](#environment-variables)
@@ -57,6 +58,42 @@ graph LR
 - **Browser Agent** drives a real, non-headless Chromium against ChatGPT Pro using a persistent profile, handles chat and image (DALL-E) requests, streams response chunks back, and pauses on `login_required`.
 
 ---
+
+## Architecture upgrades (Phase 2–6 rebuild)
+
+This repository has been rebuilt in phases on top of the original bridge.
+The upgrades below are all active by default and covered by the test suite
+(`npm test`).
+
+- **Agent core correctness + speed (Phase 1).** The browser agent reads the
+  *last* assistant turn through a single-round-trip DOM reader
+  (`browser-agent/src/browser/turnReader.ts`) — the original `:last-of-type` +
+  `querySelector` selectors resolved the OLDEST turn in multi-turn
+  conversations. Prompts are inserted in one in-page call instead of
+  20–80 ms-per-keystroke typing (opt back in with
+  `AGENT_TYPING_MODE=human`). Image stabilization is an adaptive quiet
+  window (`AGENT_STABILIZATION_MS`, default 2.5 s) instead of a fixed 55 s
+  wait. The stream timeout is idle-based, so long actively-streaming
+  responses are no longer killed at 120 s. Each request starts in a fresh
+  chat (`AGENT_NEW_CHAT_PER_REQUEST`) so the stream baseline is exact.
+- **Multi-agent tab pool (Phase 2).** One Chromium hosts
+  `AGENT_WORKERS` worker tabs; each owns a page, a state machine, and its
+  own relay socket, so the relay's least-busy dispatcher parallelises
+  dispatch across tabs with zero protocol changes.
+- **UI understanding + prompt brain (Phase 3).** `analyze_design` distils
+  the workspace's design system (Tailwind config, CSS custom properties,
+  fonts, radii, stack, dark mode) and the prompt composer v2
+  (`promptComposer.ts`) injects it — alongside per-kind blueprints and
+  negative anchors — into every generated prompt for 11 asset kinds,
+  including 3D icons, banners, and OG images.
+- **Asset cache (Phase 4).** Identical prompts in an unchanged design
+  system resolve instantly from `<workspace>/.kiro-gpt-cache.json`
+  instead of spending another generation round-trip.
+- **Content-policy auto-retry (Phase 5).** On a refusal, the MCP server
+  asks ChatGPT to rewrite the prompt policy-safe via a chat round-trip
+  and retries the image once (`KIRO_GPT_MCP_POLICY_RETRIES`).
+- **Doctor (Phase 6).** `npm run doctor` verifies Node version, built
+  artifacts, config files, and relay `/health` in one shot.
 
 ## Repository Layout
 
@@ -156,6 +193,12 @@ Any invalid value causes the relay to log a structured error identifying the var
 | `RELAY_URL` | URL of the relay server | — (required) | `ws://` or `wss://` URL |
 | `AGENT_SECRET` | Shared secret matching the relay's `AGENT_SECRET` | — (required) | string, 16–256 chars |
 | `AGENT_PROFILE_DIR` | Absolute path to the persistent Chromium profile | — (required) | absolute path that exists and is writable |
+| `AGENT_WORKERS` | Number of concurrent ChatGPT tabs (worker agents) driven by this process; each worker owns a page, a FSM, and its own relay socket so the relay parallelises dispatch across tabs | `2` | integer, 1–8 |
+| `AGENT_TYPING_MODE` | Typing strategy for the chat driver: `fast` inserts the whole prompt in one in-page call (~10–50 ms regardless of length), `human` synthesizes per-keystroke 20–80 ms jitter | `fast` | `fast` or `human` |
+| `AGENT_STABILIZATION_MS` | Adaptive image-stabilization quiet window: after each larger network capture, wait this long for a higher-quality replacement before returning the best image | `2500` | integer, 0–120000 |
+| `AGENT_NEW_CHAT_PER_REQUEST` | Navigate to a fresh chat before each dispatched request (keeps conversations short and makes stream baselining trivially correct) | `true` | boolean (`true`/`false`/`1`/`0`) |
+| `AGENT_STREAM_IDLE_TIMEOUT_MS` | Stream extractor idle budget: fail with `CHAT_TIMEOUT` after this much time with NO text growth (long active streams are never killed) | `120000` | integer, 10000–600000 |
+| `AGENT_STREAM_TOTAL_TIMEOUT_MS` | Stream extractor total wall-clock cap regardless of activity | `600000` | integer, 60000–3600000 |
 
 ### `mcp-server/`
 
@@ -165,6 +208,7 @@ Any invalid value causes the relay to log a structured error identifying the var
 | `KIRO_GPT_MCP_RELAY_URL` | `ws://` or `wss://` URL of the relay server | `ws://localhost:3001` | valid WebSocket URL |
 | `KIRO_GPT_MCP_WORKSPACE` | Absolute path to the workspace where generated assets are written | — | absolute path; takes priority over the local-device default |
 | `KIRO_GPT_MCP_DOWNLOAD_DIR` | Override for the local-device default download folder | `<home>/Downloads/kiro-gpt-bridge` | absolute path; used only when `KIRO_GPT_MCP_WORKSPACE` and the per-call `workspace_root` are both unset |
+| `KIRO_GPT_MCP_POLICY_RETRIES` | Content-policy safety net: on a `CONTENT_POLICY` refusal, a chat round-trip asks ChatGPT to rewrite the prompt policy-safe and the image is retried once | `1` | integer, 0–2 |
 
 **Where files are saved (resolution order).** Every generated asset is written to the first of these that is set:
 
@@ -254,6 +298,44 @@ Register the kiro-gpt-bridge MCP server in `.kiro/settings/mcp.json` so the Kiro
   }
 }
 ```
+
+#### Use from any IDE or machine
+
+The server speaks plain MCP over stdio, so any MCP-capable host (Kiro,
+Cursor, Windsurf, Claude Desktop, ZCode, ...) can drive it. On a fresh
+machine:
+
+```bash
+git clone https://github.com/Souvik988/image-gpt.git
+cd image-gpt
+npm install
+npm run build
+npm run doctor   # verifies Node, builds, config, relay reachability
+```
+
+Then register it in the host's MCP config with an **absolute** path to the
+cloned repo (replace `<clone-root>`):
+
+```json
+{
+  "mcpServers": {
+    "kiro-gpt-bridge": {
+      "command": "node",
+      "args": ["<clone-root>/mcp-server/dist/index.js"],
+      "env": {
+        "KIRO_GPT_MCP_SECRET": "<same value as the relay's KIRO_SECRET>",
+        "KIRO_GPT_MCP_RELAY_URL": "ws://localhost:3001"
+      }
+    }
+  }
+}
+```
+
+With `KIRO_GPT_MCP_WORKSPACE` unset, every generated asset lands in
+`<home>/Downloads/kiro-gpt-bridge` — zero further configuration. The relay
+and browser-agent still run locally (`start-relay.bat` / `start-agent.bat`
+on Windows); the browser agent opens ChatGPT once for a one-time login and
+keeps the session in its persistent profile.
 
 The three env vars are the only configuration the server reads:
 
@@ -363,6 +445,111 @@ Visual mockup of a component. `viewport` defaults to `"desktop 1440x900"`.
     "framework":             { "type": "string", "enum": ["next", "nuxt", "sveltekit", "vite", "angular", "cra", "unknown"] },
     "workspace_root":        { "type": "string" },
     "overwrite":             { "type": "boolean" }
+  },
+  "additionalProperties": false
+}
+```
+
+#### Cross-cutting arguments on single-asset tools
+
+Every single-asset tool (`generate_image`, `generate_logo`, `generate_hero`,
+`generate_ui_mockup`, `generate_banner`, `generate_og_image`, `generate_icon_3d`)
+also accepts:
+
+- `cache` (boolean, default `true`) — content-addressed skip-regeneration. The
+  final composed prompt (which already embeds the workspace's design brief, so
+  design-token changes invalidate naturally) is hashed; a recorded hit whose
+  file still exists is returned instantly instead of spending a 10–60 s
+  generation. Pass `cache: false` to force a fresh generation. Entries live in
+  `<workspace>/.kiro-gpt-cache.json` (capped at 500, atomic writes).
+- `enhance_prompt` (boolean, default off) — the single-turn expansion wrapper
+  from the original design (see `promptEnhancer.ts`).
+
+All seven tools route their submission through the policy-retry safety net
+described by `KIRO_GPT_MCP_POLICY_RETRIES` above.
+
+#### `generate_banner`
+
+Website banner / ad-unit graphic with a closed size preset. Saved under the
+framework's `hero/` folder.
+
+```json
+{
+  "type": "object",
+  "required": ["description"],
+  "properties": {
+    "description":   { "type": "string", "minLength": 1 },
+    "size":          { "type": "string", "enum": ["leaderboard", "medium_rectangle", "wide_skyscraper", "billboard", "hero_wide"] },
+    "style":         { "type": "string" },
+    "framework":     { "type": "string", "enum": ["next", "nuxt", "sveltekit", "vite", "angular", "cra", "unknown"] },
+    "workspace_root": { "type": "string" },
+    "overwrite":     { "type": "boolean" },
+    "cache":         { "type": "boolean" },
+    "enhance_prompt": { "type": "boolean" }
+  },
+  "additionalProperties": false
+}
+```
+
+#### `generate_og_image`
+
+1200×630 Open Graph / social card with headline-safe negative space (text is
+overlaid in code — the prompt forbids embedded text). Saved with an
+`og-image` stem in the framework base directory.
+
+```json
+{
+  "type": "object",
+  "required": ["description"],
+  "properties": {
+    "description":   { "type": "string", "minLength": 1 },
+    "style":         { "type": "string" },
+    "framework":     { "type": "string", "enum": ["next", "nuxt", "sveltekit", "vite", "angular", "cra", "unknown"] },
+    "workspace_root": { "type": "string" },
+    "overwrite":     { "type": "boolean" },
+    "cache":         { "type": "boolean" },
+    "enhance_prompt": { "type": "boolean" }
+  },
+  "additionalProperties": false
+}
+```
+
+#### `generate_icon_3d`
+
+Single 3D-rendered icon (studio lighting, soft materials, rounded bevels).
+Saved into the framework's `icons/` folder with an `icon3d-` stem so the flat
+and 3D icon families never collide.
+
+```json
+{
+  "type": "object",
+  "required": ["subject"],
+  "properties": {
+    "subject":       { "type": "string", "minLength": 1 },
+    "style":         { "type": "string" },
+    "framework":     { "type": "string", "enum": ["next", "nuxt", "sveltekit", "vite", "angular", "cra", "unknown"] },
+    "workspace_root": { "type": "string" },
+    "overwrite":     { "type": "boolean" },
+    "cache":         { "type": "boolean" },
+    "enhance_prompt": { "type": "boolean" }
+  },
+  "additionalProperties": false
+}
+```
+
+#### `analyze_design`
+
+Read-only UI understanding. Scans the workspace (framework fingerprints,
+Tailwind config, CSS custom properties, package.json) and returns the
+distilled design system — colors, fonts, corner radii, stack, dark mode —
+plus a one-line `designBrief` that is automatically injected into every
+generation prompt. Requires no relay connection.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "workspace_root": { "type": "string" }
   },
   "additionalProperties": false
 }

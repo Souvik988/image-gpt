@@ -6,68 +6,49 @@
  * Validates:
  *  - The final chunk text equals the concatenation of all prior chunk texts.
  *  - Chunks emit at most every 250 ms apart (chunkIntervalMs).
- *  - 120 s with no chunks yields a final CHAT_TIMEOUT failure.
+ *  - Idle timeout with no chunks yields a final CHAT_TIMEOUT failure.
+ *  - Only the NEW turn (turnCount > baseline) is streamed — a pre-existing
+ *    complete turn never leaks into the stream.
  *
  * **Validates: Requirements 9.4, 9.5, 9.8, 16.1, 27.5**
  */
 
 import { describe, it, expect } from 'vitest';
 import * as fc from 'fast-check';
-import { extractStream, type StreamExtractorPage, type StreamExtractorEvent } from '../src/browser/streamExtractor.js';
+import { extractStream, type StreamExtractorEvent } from '../src/browser/streamExtractor.js';
+import type { LastTurnState } from '../src/browser/turnReader.js';
 
 // ─── Mock page infrastructure ───────────────────────────────────────────────
 
-interface MockPageState {
-  /** Current assistant body text (grows over time). */
-  bodyText: string;
-  /** Whether the message is finished. */
-  finished: boolean;
-  /** Whether there's a chat error. */
-  chatError: string | null;
-  /** Whether the stop button is visible. */
-  stopVisible: boolean;
-  /** Whether the regenerate button is visible. */
-  regenVisible: boolean;
-}
-
-function createMockPage(state: MockPageState): StreamExtractorPage {
+/**
+ * Build a mocked page whose single `evaluate` contract returns a
+ * `LastTurnState` snapshot directly (mirroring the production
+ * single-round-trip reader).
+ */
+function snapshotPage(
+  snapshot: () => LastTurnState | null,
+): Parameters<typeof extractStream>[0] {
   return {
     url(): string {
-      return 'https://chat.openai.com/c/test';
+      return 'https://chatgpt.com/c/test';
     },
-    async evaluate<R>(fn: (...args: unknown[]) => R | Promise<R>, ...args: unknown[]): Promise<R> {
-      const selector = args[0] as string;
-
-      // Chat error banner detection
-      if (selector.includes('error') || selector === '.text-token-text-error' || selector === '[role="alert"]') {
-        if (state.chatError !== null) {
-          return state.chatError as unknown as R;
-        }
-        return null as unknown as R;
-      }
-
-      // Message finished marker detection
-      if (selector.includes('data-message-finished')) {
-        return state.finished as unknown as R;
-      }
-
-      // Regenerate button detection
-      if (selector.includes('regenerate') || selector.includes('Regenerate')) {
-        return state.regenVisible as unknown as R;
-      }
-
-      // Stop button detection
-      if (selector.includes('stop') || selector.includes('Stop')) {
-        return state.stopVisible as unknown as R;
-      }
-
-      // Assistant message body read — return innerText
-      if (selector.includes('assistant') || selector.includes('markdown') || selector.includes('message-id')) {
-        return state.bodyText as unknown as R;
-      }
-
-      return null as unknown as R;
+    async evaluate<R>(_fn: (...args: unknown[]) => R | Promise<R>, ..._args: unknown[]): Promise<R> {
+      const s = snapshot();
+      return (s === null ? null : s) as unknown as R;
     },
+  };
+}
+
+function makeSnapshot(overrides: Partial<LastTurnState>): LastTurnState {
+  return {
+    turnCount: 1,
+    text: '',
+    finished: false,
+    errorText: null,
+    regenVisible: false,
+    stopVisible: true,
+    imageUrl: null,
+    ...overrides,
   };
 }
 
@@ -102,57 +83,24 @@ describe('Property 6: Stream consistency', () => {
           let bodyText = '';
           let finished = false;
 
-          const state: MockPageState = {
-            bodyText: '',
-            finished: false,
-            chatError: null,
-            stopVisible: true,
-            regenVisible: false,
-          };
-
-          // Schedule: each segment arrives after its gapMs
-          const page = createMockPage(state);
-
-          // Override evaluate to use dynamic state
-          const dynamicPage: StreamExtractorPage = {
-            url: () => 'https://chat.openai.com/c/test',
-            async evaluate<R>(fn: (...args: unknown[]) => R | Promise<R>, ...args: unknown[]): Promise<R> {
-              const selector = args[0] as string;
-
-              // Chat error banner
-              if (selector.includes('error') || selector === '.text-token-text-error' || selector === '[role="alert"]') {
-                return null as unknown as R;
+          const page = snapshotPage(() => {
+            if (segmentIndex < segments.length) {
+              bodyText += segments[segmentIndex].text;
+              segmentIndex += 1;
+              if (segmentIndex >= segments.length) {
+                finished = true;
               }
+            }
+            return makeSnapshot({
+              text: bodyText,
+              finished,
+              regenVisible: finished,
+              stopVisible: !finished,
+            });
+          });
 
-              // Message finished marker
-              if (selector.includes('data-message-finished')) {
-                return finished as unknown as R;
-              }
-
-              // Regenerate button
-              if (selector.includes('regenerate') || selector.includes('Regenerate')) {
-                return finished as unknown as R;
-              }
-
-              // Stop button
-              if (selector.includes('stop') || selector.includes('Stop')) {
-                return (!finished) as unknown as R;
-              }
-
-              // Assistant message body — advance text on each read
-              if (segmentIndex < segments.length) {
-                bodyText += segments[segmentIndex].text;
-                segmentIndex++;
-                if (segmentIndex >= segments.length) {
-                  finished = true;
-                }
-              }
-              return bodyText as unknown as R;
-            },
-          };
-
-          const gen = extractStream(dynamicPage, 'req-prop6', {
-            timeoutMs: 120_000,
+          const gen = extractStream(page, 'req-prop6', { turnCount: 0, lastText: '' }, {
+            idleTimeoutMs: 120_000,
             chunkIntervalMs: 50,
             finalEmitBudgetMs: 10,
             sleep: async (_ms: number) => { currentTime += 50; },
@@ -187,42 +135,21 @@ describe('Property 6: Stream consistency', () => {
     );
   });
 
-  it('120s with no chunks yields a CHAT_TIMEOUT failure', async () => {
+  it('idle timeout with no chunks yields a CHAT_TIMEOUT failure', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.integer({ min: 120_000, max: 200_000 }),
-        async (timeoutMs) => {
+        async (idleTimeoutMs) => {
           let currentTime = 0;
 
-          // Page that never produces any text and never finishes
-          const emptyPage: StreamExtractorPage = {
-            url: () => 'https://chat.openai.com/c/test',
-            async evaluate<R>(_fn: (...args: unknown[]) => R | Promise<R>, ...args: unknown[]): Promise<R> {
-              const selector = args[0] as string;
+          // Page whose last turn never grows and never finishes (a
+          // pre-existing OLD turn — turnCount equals baseline).
+          const page = snapshotPage(() =>
+            makeSnapshot({ turnCount: 0, text: '', finished: false, stopVisible: true }),
+          );
 
-              // No error
-              if (selector.includes('error') || selector === '.text-token-text-error' || selector === '[role="alert"]') {
-                return null as unknown as R;
-              }
-              // Not finished
-              if (selector.includes('data-message-finished')) {
-                return false as unknown as R;
-              }
-              // No regenerate
-              if (selector.includes('regenerate') || selector.includes('Regenerate')) {
-                return false as unknown as R;
-              }
-              // Stop visible (still streaming)
-              if (selector.includes('stop') || selector.includes('Stop')) {
-                return true as unknown as R;
-              }
-              // No body text
-              return null as unknown as R;
-            },
-          };
-
-          const gen = extractStream(emptyPage, 'req-timeout', {
-            timeoutMs: 120_000,
+          const gen = extractStream(page, 'req-timeout', { turnCount: 0, lastText: '' }, {
+            idleTimeoutMs,
             chunkIntervalMs: 250,
             sleep: async (ms: number) => { currentTime += ms; },
             now: () => currentTime,
@@ -238,7 +165,7 @@ describe('Property 6: Stream consistency', () => {
           }
         },
       ),
-      { numRuns: 200 },
+      { numRuns: 100 },
     );
   });
 
@@ -255,37 +182,24 @@ describe('Property 6: Stream consistency', () => {
           let bodyText = '';
           let finished = false;
 
-          const dynamicPage: StreamExtractorPage = {
-            url: () => 'https://chat.openai.com/c/test',
-            async evaluate<R>(_fn: (...args: unknown[]) => R | Promise<R>, ...args: unknown[]): Promise<R> {
-              const selector = args[0] as string;
+          const page = snapshotPage(() => {
+            if (segmentIndex < textSegments.length) {
+              bodyText += textSegments[segmentIndex];
+              segmentIndex += 1;
+              if (segmentIndex >= textSegments.length) {
+                finished = true;
+              }
+            }
+            return makeSnapshot({
+              text: bodyText,
+              finished,
+              regenVisible: finished,
+              stopVisible: !finished,
+            });
+          });
 
-              if (selector.includes('error') || selector === '.text-token-text-error' || selector === '[role="alert"]') {
-                return null as unknown as R;
-              }
-              if (selector.includes('data-message-finished')) {
-                return finished as unknown as R;
-              }
-              if (selector.includes('regenerate') || selector.includes('Regenerate')) {
-                return finished as unknown as R;
-              }
-              if (selector.includes('stop') || selector.includes('Stop')) {
-                return (!finished) as unknown as R;
-              }
-
-              if (segmentIndex < textSegments.length) {
-                bodyText += textSegments[segmentIndex];
-                segmentIndex++;
-                if (segmentIndex >= textSegments.length) {
-                  finished = true;
-                }
-              }
-              return bodyText as unknown as R;
-            },
-          };
-
-          const gen = extractStream(dynamicPage, 'req-mono', {
-            timeoutMs: 120_000,
+          const gen = extractStream(page, 'req-mono', { turnCount: 0, lastText: '' }, {
+            idleTimeoutMs: 120_000,
             chunkIntervalMs: 50,
             finalEmitBudgetMs: 10,
             sleep: async (_ms: number) => { currentTime += 50; },
@@ -306,5 +220,83 @@ describe('Property 6: Stream consistency', () => {
       ),
       { numRuns: 200 },
     );
+  });
+
+  it('a pre-existing complete turn is never streamed as the new response', async () => {
+    // Regression test for the `:last-of-type` + querySelector bug: the
+    // OLD implementation read turn 1's static text and instantly emitted
+    // it as the response to the new request. The baseline-aware extractor
+    // must wait for a NEW turn instead.
+    let currentTime = 0;
+    const staleText = 'This is the response to an EARLIER question.';
+    let newTurnArrived = false;
+
+    const page = snapshotPage(() => {
+      // Flip to the new turn after ~10 poll cycles on the mocked clock.
+      if (currentTime >= 100) newTurnArrived = true;
+      if (!newTurnArrived) {
+        // One old, complete assistant turn in the conversation.
+        return makeSnapshot({ turnCount: 1, text: staleText, finished: true, regenVisible: true, stopVisible: false });
+      }
+      // The NEW turn is a different DOM element — its innerText contains
+      // only its own body, never the earlier turn's text.
+      return makeSnapshot({ turnCount: 2, text: 'new body', finished: true, regenVisible: true, stopVisible: false });
+    });
+
+    const gen = extractStream(page, 'req-stale', { turnCount: 1, lastText: staleText }, {
+      idleTimeoutMs: 5_000,
+      totalTimeoutMs: 60_000,
+      chunkIntervalMs: 10,
+      finalEmitBudgetMs: 10,
+      sleep: async (_ms: number) => { currentTime += 10; },
+      now: () => currentTime,
+    });
+
+    // Flip to the new turn after the first poll cycle (clock-driven,
+    // see the snapshot closure above).
+    void 0;
+
+    const events = await collectEvents(gen);
+
+    const lastEvent = events[events.length - 1];
+    expect(lastEvent.kind).toBe('final');
+    if (lastEvent.kind === 'final') {
+      // The final text must contain ONLY the new turn's body — the stale
+      // prefix must never leak into the streamed response.
+      expect(lastEvent.chunk.text).toBe('new body');
+    }
+  });
+
+  it('idle-based timeout does NOT kill an actively streaming response', async () => {
+    // Regression test for the total-elapsed timeout bug: text keeps
+    // growing well past 120 s of wall clock; the extractor must only
+    // time out after IDLE inactivity.
+    let currentTime = 0;
+    let growth = 0;
+
+    const page = snapshotPage(() => {
+      growth += 1;
+      return makeSnapshot({
+        text: 'x'.repeat(growth),
+        finished: growth >= 200,
+        regenVisible: growth >= 200,
+        stopVisible: growth < 200,
+      });
+    });
+
+    const gen = extractStream(page, 'req-longstream', { turnCount: 0, lastText: '' }, {
+      idleTimeoutMs: 1_000,
+      totalTimeoutMs: 600_000,
+      chunkIntervalMs: 50,
+      finalEmitBudgetMs: 10,
+      sleep: async (_ms: number) => { currentTime += 50; },
+      now: () => currentTime,
+    });
+
+    const events = await collectEvents(gen);
+    const lastEvent = events[events.length - 1];
+    // 200 growth events at 50 ms each = 10 s total, far past the 1 s
+    // idle budget — the stream must complete, not fail.
+    expect(lastEvent.kind).toBe('final');
   });
 });

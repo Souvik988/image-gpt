@@ -13,6 +13,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "vitest --run",
+    "doctor": "node scripts/doctor.mjs",
     "test:slow": "vitest --run --config vitest.config.slow.ts",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write \"**/*.{ts,tsx,md,json,yml,yaml}\""

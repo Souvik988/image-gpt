@@ -61,6 +61,10 @@ import { generateLogo } from './tools/generateLogo.js';
 import { generateHero } from './tools/generateHero.js';
 import { generateIconSet } from './tools/generateIconSet.js';
 import { generateUiMockup } from './tools/generateUiMockup.js';
+import { generateBanner } from './tools/generateBanner.js';
+import { generateOgImage } from './tools/generateOgImage.js';
+import { generateIcon3d } from './tools/generateIcon3d.js';
+import { analyzeDesign } from './tools/analyzeDesign.js';
 import type { McpToolContext } from './tools/common.js';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
@@ -266,6 +270,91 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'generate_banner',
+    description:
+      'Generate a website banner / ad-unit graphic with a closed size preset (leaderboard, medium rectangle, wide skyscraper, billboard, hero wide) and save it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        description: { type: 'string', minLength: 1 },
+        size: {
+          type: 'string',
+          enum: [
+            'leaderboard',
+            'medium_rectangle',
+            'wide_skyscraper',
+            'billboard',
+            'hero_wide',
+          ],
+        },
+        style: { type: 'string' },
+        framework: {
+          type: 'string',
+          enum: ['next', 'nuxt', 'sveltekit', 'vite', 'angular', 'cra', 'unknown'],
+        },
+        workspace_root: { type: 'string' },
+        overwrite: { type: 'boolean' },
+        enhance_prompt: { type: 'boolean' },
+      },
+      required: ['description'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'generate_og_image',
+    description:
+      'Generate a 1200x630 Open Graph / social-card image with headline-safe negative space and save it (filename stem og-image).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        description: { type: 'string', minLength: 1 },
+        style: { type: 'string' },
+        framework: {
+          type: 'string',
+          enum: ['next', 'nuxt', 'sveltekit', 'vite', 'angular', 'cra', 'unknown'],
+        },
+        workspace_root: { type: 'string' },
+        overwrite: { type: 'boolean' },
+        enhance_prompt: { type: 'boolean' },
+      },
+      required: ['description'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'generate_icon_3d',
+    description:
+      'Generate a single 3D-rendered icon (studio lighting, soft materials) and save it to the icons folder with an icon3d- stem.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        subject: { type: 'string', minLength: 1 },
+        style: { type: 'string' },
+        framework: {
+          type: 'string',
+          enum: ['next', 'nuxt', 'sveltekit', 'vite', 'angular', 'cra', 'unknown'],
+        },
+        workspace_root: { type: 'string' },
+        overwrite: { type: 'boolean' },
+        enhance_prompt: { type: 'boolean' },
+      },
+      required: ['subject'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'analyze_design',
+    description:
+      'Read-only UI analysis: scans the workspace (framework, Tailwind config, CSS custom properties, package.json) and returns the distilled design system (colors, fonts, radii, stack, dark mode) as JSON plus a one-line design brief. Use this to understand the UI before composing generation briefs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspace_root: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 // ─── Lazy relay connect ────────────────────────────────────────────────────
@@ -363,6 +452,7 @@ async function main(): Promise<void> {
         ? (params.arguments as Record<string, unknown>)
         : {};
 
+    const startedAt = Date.now();
     // Lazy-connect the relay on the first tool call. The connect
     // promise resolves whether or not the connection succeeded; tool
     // handlers detect failure via `relayClient.isConnected()` and
@@ -386,6 +476,18 @@ async function main(): Promise<void> {
       case 'generate_ui_mockup':
         result = await generateUiMockup(args, ctx);
         break;
+      case 'generate_banner':
+        result = await generateBanner(args, ctx);
+        break;
+      case 'generate_og_image':
+        result = await generateOgImage(args, ctx);
+        break;
+      case 'generate_icon_3d':
+        result = await generateIcon3d(args, ctx);
+        break;
+      case 'analyze_design':
+        result = await analyzeDesign(args, ctx);
+        break;
       default:
         log('warn', 'mcp_unknown_tool', { tool: toolName });
         return {
@@ -407,6 +509,7 @@ async function main(): Promise<void> {
     log(ok ? 'info' : 'error', 'mcp_tool_result', {
       tool: toolName,
       ok,
+      durationMs: Date.now() - startedAt,
     });
     return {
       content: [{ type: 'text', text: JSON.stringify(result) }],

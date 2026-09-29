@@ -31,6 +31,43 @@ export interface AgentConfig {
   readonly relayUrl: string;
   /** Shared `Agent_Secret` (16..256 chars). Used for handshake and re-auth. (R11.2) */
   readonly agentSecret: string;
+  /**
+   * Typing strategy for the chat driver. `'fast'` inserts the whole
+   * prompt with one in-page `insertText` call (~10-50 ms regardless of
+   * length); `'human'` synthesizes per-keystroke 20-80 ms jitter.
+   * Default `'fast'`.
+   */
+  readonly typingMode: 'fast' | 'human';
+  /**
+   * Adaptive image-stabilization quiet window in ms: after each larger
+   * network capture, wait this long for a higher-quality replacement
+   * before returning the best image. Replaces the original fixed 55 s
+   * wait. Default `2500`.
+   */
+  readonly stabilizationQuietMs: number;
+  /**
+   * Navigate to a fresh chat before each dispatched request. Keeps
+   * conversations short (faster page, no cross-request context bleed).
+   * Default `true`.
+   */
+  readonly newChatPerRequest: boolean;
+  /**
+   * Stream-extractor idle budget in ms: fail with CHAT_TIMEOUT after
+   * this much time with no text growth. Default `120000`.
+   */
+  readonly streamIdleTimeoutMs: number;
+  /**
+   * Stream-extractor total wall-clock cap in ms regardless of activity.
+   * Default `600000`.
+   */
+  readonly streamTotalTimeoutMs: number;
+  /**
+   * Number of concurrent ChatGPT tabs (worker agents) driven by this
+   * browser-agent process. Each worker owns a page, a FSM, and its own
+   * relay socket connection, so the relay's dispatcher sees N agents and
+   * parallelises across tabs automatically. Range 1..8, default 2.
+   */
+  readonly workerCount: number;
 }
 
 /**
@@ -191,6 +228,66 @@ function parseSecret(
  * @param deps Defaults to `{}` (real `process.exit` / `process.stderr` /
  *   `fs.accessSync`). Tests inject stubs to capture failures.
  */
+
+/**
+ * Validate an enum-valued environment variable. Unset → `dflt`.
+ * Set but not in `allowed` → fatal.
+ */
+function parseEnum<T extends string>(
+  name: string,
+  raw: string | undefined,
+  allowed: readonly T[],
+  dflt: T,
+  deps: ConfigDeps,
+): T {
+  if (raw === undefined || raw === '') return dflt;
+  const lowered = raw.trim().toLowerCase() as T;
+  if (!allowed.includes(lowered)) {
+    fatal(name, `one of [${allowed.join(', ')}]`, `got ${JSON.stringify(raw)}`, deps);
+  }
+  return lowered;
+}
+
+/**
+ * Validate a boolean environment variable accepting `true`/`false`
+ * (case-insensitive) plus `1`/`0`. Unset → `dflt`. Anything else → fatal.
+ */
+function parseBool(
+  name: string,
+  raw: string | undefined,
+  dflt: boolean,
+  deps: ConfigDeps,
+): boolean {
+  if (raw === undefined || raw === '') return dflt;
+  const lowered = raw.trim().toLowerCase();
+  if (lowered === 'true' || lowered === '1') return true;
+  if (lowered === 'false' || lowered === '0') return false;
+  fatal(name, 'boolean (true/false/1/0)', `got ${JSON.stringify(raw)}`, deps);
+}
+
+/**
+ * Validate an integer environment variable within `min`..`max` inclusive.
+ * Unset → `dflt`. Non-integer or out of range → fatal.
+ */
+function parseIntInRange(
+  name: string,
+  raw: string | undefined,
+  min: number,
+  max: number,
+  dflt: number,
+  deps: ConfigDeps,
+): number {
+  if (raw === undefined || raw === '') return dflt;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || String(parsed) !== raw.trim()) {
+    fatal(name, `integer in [${min}, ${max}]`, `got ${JSON.stringify(raw)}`, deps);
+  }
+  if (parsed < min || parsed > max) {
+    fatal(name, `integer in [${min}, ${max}]`, `got ${parsed}`, deps);
+  }
+  return parsed;
+}
+
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
   deps: ConfigDeps = {},
@@ -198,5 +295,60 @@ export function loadConfig(
   const profileDir = parseProfileDir(env.AGENT_PROFILE_DIR, deps);
   const relayUrl = parseRelayUrl(env.RELAY_URL, deps);
   const agentSecret = parseSecret('AGENT_SECRET', env.AGENT_SECRET, deps);
-  return { profileDir, relayUrl, agentSecret };
+  const typingMode = parseEnum(
+    'AGENT_TYPING_MODE',
+    env.AGENT_TYPING_MODE,
+    ['fast', 'human'] as const,
+    'fast',
+    deps,
+  );
+  const stabilizationQuietMs = parseIntInRange(
+    'AGENT_STABILIZATION_MS',
+    env.AGENT_STABILIZATION_MS,
+    0,
+    120_000,
+    2_500,
+    deps,
+  );
+  const newChatPerRequest = parseBool(
+    'AGENT_NEW_CHAT_PER_REQUEST',
+    env.AGENT_NEW_CHAT_PER_REQUEST,
+    true,
+    deps,
+  );
+  const streamIdleTimeoutMs = parseIntInRange(
+    'AGENT_STREAM_IDLE_TIMEOUT_MS',
+    env.AGENT_STREAM_IDLE_TIMEOUT_MS,
+    10_000,
+    600_000,
+    120_000,
+    deps,
+  );
+  const streamTotalTimeoutMs = parseIntInRange(
+    'AGENT_STREAM_TOTAL_TIMEOUT_MS',
+    env.AGENT_STREAM_TOTAL_TIMEOUT_MS,
+    60_000,
+    3_600_000,
+    600_000,
+    deps,
+  );
+  const workerCount = parseIntInRange(
+    'AGENT_WORKERS',
+    env.AGENT_WORKERS,
+    1,
+    8,
+    2,
+    deps,
+  );
+  return {
+    profileDir,
+    relayUrl,
+    agentSecret,
+    typingMode,
+    stabilizationQuietMs,
+    newChatPerRequest,
+    streamIdleTimeoutMs,
+    streamTotalTimeoutMs,
+    workerCount,
+  };
 }

@@ -51,7 +51,7 @@ import {
   type GenerateImageResult,
   type KiroGptBridgeApi,
 } from './api/extensionApi.js';
-import type { SessionId } from '@kiro-gpt-bridge/shared';
+import type { ErrorCode, SessionId } from '@kiro-gpt-bridge/shared';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -146,7 +146,7 @@ export async function activate(
     void vscode.window.showErrorMessage(
       'kiroGptBridge.relayUrl is not set. Configure it in settings to connect.',
     );
-    return makeStubApi('relayUrl_unset');
+    return makeStubApi('SCHEMA_INVALID', 'kiroGptBridge.relayUrl is unset');
   }
 
   // R4.2: non-URL string → error, no outbound connection.
@@ -157,7 +157,7 @@ export async function activate(
     void vscode.window.showErrorMessage(
       `kiroGptBridge.relayUrl is not a valid URL: ${(e as Error).message}`,
     );
-    return makeStubApi('relayUrl_invalid');
+    return makeStubApi('SCHEMA_INVALID', 'kiroGptBridge.relayUrl is not a valid URL');
   }
 
   const kiroSecret = config.get<string>('kiroSecret') ?? '';
@@ -334,19 +334,19 @@ export async function activate(
  * structured `errorCode` instead of a runtime crash. The non-throwing
  * shape matches R29.7.
  *
- * @param reason Short identifier surfaced via `errorCode` so callers
+ * @param code   Closed-enum wire error code surfaced to the caller.
+ * @param reason Specific reason string carried in `message` so callers
  *               can distinguish "url missing" from "url invalid".
  * @returns      A typed stub matching {@link KiroGptBridgeApi}.
  */
-function makeStubApi(reason: string): KiroGptBridgeApi {
+function makeStubApi(code: ErrorCode, reason: string): KiroGptBridgeApi {
   return {
     async generateImage(opts: GenerateImageOptions): Promise<GenerateImageResult> {
       return {
         requestId: 'stub',
         prompt: opts.prompt,
-        errorCode: reason,
-        message:
-          'KIRO-GPT Bridge is not connected (configure kiroGptBridge.relayUrl).',
+        errorCode: code,
+        message: `${reason} — KIRO-GPT Bridge is not connected (configure kiroGptBridge.relayUrl).`,
       };
     },
   };

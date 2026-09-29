@@ -1,19 +1,22 @@
 /**
- * MCP tool handler: `generate_ui_mockup`.
+ * MCP tool handler: `generate_icon_3d`.
  *
- * Implements R31.3 (UI mockup tool), R31.4 (template-built prompt), R31.6
- * (success shape), R31.7 (closed-enum error codes; no file write on
- * failure).
+ * Phase 3 asset tool — a single 3D-rendered icon with studio-lighting
+ * material language. Complements `generate_icon_set` (flat outline
+ * pictograms): 3D icons live in the same framework `icons/` folder but
+ * carry an `icon3d-` filename stem so the two families never collide.
  *
  * Accepted arguments:
- *   - component_description  (string, required)
- *   - viewport               (string, optional, default 'desktop 1440x900')
- *   - framework              (Framework, default 'unknown')
- *   - workspace_root         (string, overrides KIRO_GPT_MCP_WORKSPACE)
- *   - overwrite              (boolean, default false)
+ *   - subject          (string, required — the icon subject)
+ *   - style            (string, optional extra style directive)
+ *   - framework        (Framework, default 'unknown')
+ *   - workspace_root   (string, overrides KIRO_GPT_MCP_WORKSPACE)
+ *   - overwrite        (boolean, default false)
+ *   - enhance_prompt   (boolean, opt-in single-turn rewrite)
  */
 
-import { PROMPT_TEMPLATES } from '../promptTemplates.js';
+import { composePrompt } from '../promptComposer.js';
+import { analyzeDesignContext } from '../designContext.js';
 import {
   atomicWrite,
   coerceEnhancePromptFlag,
@@ -21,7 +24,6 @@ import {
   decodeFinalChunk,
   ensureConnected,
   fail,
-  prepareImagePrompt,
   resolveTargetPath,
   tryResolveWorkspace,
   validateImagePrompt,
@@ -30,48 +32,30 @@ import {
   type McpToolContext,
 } from './common.js';
 import { lookupCachedAsset, recordCachedAsset } from '../assetCache.js';
-import { analyzeDesignContext } from '../designContext.js';
 
-/** Arguments for `generate_ui_mockup`. */
-export interface GenerateUiMockupArgs {
-  component_description?: unknown;
-  viewport?: unknown;
+/** Arguments for `generate_icon_3d`. */
+export interface GenerateIcon3dArgs {
+  subject?: unknown;
+  style?: unknown;
   framework?: unknown;
   workspace_root?: unknown;
   overwrite?: unknown;
   /** Opt out of the content-addressed asset cache for this call. */
   cache?: unknown;
-  /**
-   * Opt in to the LLM-rewrite pre-stage for this call. See
-   * {@link enhancePrompt} for behaviour and failure semantics.
-   */
   enhance_prompt?: unknown;
 }
 
-/**
- * Run the `generate_ui_mockup` tool. Implements R31.3 (mockup), R31.4,
- * R31.6, R31.7.
- */
-export async function generateUiMockup(
-  args: GenerateUiMockupArgs | undefined,
+/** Run the `generate_icon_3d` tool. */
+export async function generateIcon3d(
+  args: GenerateIcon3dArgs | undefined,
   ctx: McpToolContext,
 ): Promise<McpImageResult> {
   const a = args ?? {};
 
-  if (
-    typeof a.component_description !== 'string' ||
-    a.component_description.trim().length === 0
-  ) {
-    return fail(
-      'INVALID_PROMPT',
-      'component_description is required and must be a non-empty string',
-    );
+  if (typeof a.subject !== 'string' || a.subject.trim().length === 0) {
+    return fail('INVALID_PROMPT', 'subject is required and must be a non-empty string');
   }
-  const viewport = typeof a.viewport === 'string' ? a.viewport : undefined;
-
-  const templated = PROMPT_TEMPLATES.uiMockup(a.component_description, viewport);
-  const promptCheck = validateImagePrompt(templated);
-  if (promptCheck.ok !== true) return promptCheck;
+  const style = typeof a.style === 'string' ? a.style : undefined;
 
   const framework = coerceFramework(a.framework);
   const overwrite = a.overwrite === true;
@@ -86,26 +70,18 @@ export async function generateUiMockup(
   const ws = tryResolveWorkspace(ctx, workspaceArg);
   if (ws.ok !== true) return ws;
 
-  // UI understanding: append the workspace's design-system brief when
-  // readable so the asset inherits the project's palette / typography.
-  let designBrief = '';
-  try {
-    const design = await analyzeDesignContext(ws.workspaceRoot);
-    designBrief = design.brief;
-  } catch {
-    /* best effort — proceed without design context */
-  }
-  const withDesign =
-    designBrief.length > 0 ? `${templated} ${designBrief}` : templated;
+  const design = await analyzeDesignContext(ws.workspaceRoot);
+  const framing =
+    'Single 3D icon of the described subject, square 1:1 canvas, centered, generous padding.';
 
-  const enhanced = prepareImagePrompt({
-    templated: withDesign,
-    kind: 'ui',
-    perCallOptIn: enhanceOptIn,
+  const prompt = composePrompt({
+    kind: 'icon3d',
+    specifics: `${a.subject} ${framing}`,
+    design,
+    style,
   });
-  const enhancedCheck = validateImagePrompt(enhanced.prompt);
-  if (enhancedCheck.ok !== true) return enhancedCheck;
-  const prompt = enhanced.prompt;
+  const promptCheck = validateImagePrompt(prompt);
+  if (promptCheck.ok !== true) return promptCheck;
 
   // Asset cache (Phase 4): identical prompt + unchanged design system
   // means the generation round-trip can be skipped entirely.
@@ -118,7 +94,7 @@ export async function generateUiMockup(
         mimeType: cached.mimeType,
         prompt,
         requestId: `cached-${cached.hash}`,
-        assetCategory: 'mockup',
+        assetCategory: 'icon',
       };
     }
   }
@@ -136,8 +112,9 @@ export async function generateUiMockup(
   const target = await resolveTargetPath({
     workspaceRoot: ws.workspaceRoot,
     framework,
-    assetCategory: 'mockup',
-    prompt: a.component_description,
+    assetCategory: 'icon',
+    filename: `icon3d-${a.subject}`,
+    prompt: a.subject,
     mimeType: decoded.mimeType,
     overwrite,
   });
@@ -160,6 +137,6 @@ export async function generateUiMockup(
     mimeType: decoded.mimeType,
     prompt: promptUsed,
     requestId,
-    assetCategory: 'mockup',
+    assetCategory: 'icon',
   };
 }

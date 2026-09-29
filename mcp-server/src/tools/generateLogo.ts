@@ -17,20 +17,20 @@
 import { PROMPT_TEMPLATES } from '../promptTemplates.js';
 import {
   atomicWrite,
-  buildImageRequest,
   coerceEnhancePromptFlag,
   coerceFramework,
   decodeFinalChunk,
   ensureConnected,
   fail,
-  mapRelayError,
   prepareImagePrompt,
   resolveTargetPath,
   tryResolveWorkspace,
   validateImagePrompt,
+  submitImageRequest,
   type McpImageResult,
   type McpToolContext,
 } from './common.js';
+import { lookupCachedAsset, recordCachedAsset } from '../assetCache.js';
 
 /** Arguments for `generate_logo`. */
 export interface GenerateLogoArgs {
@@ -40,6 +40,8 @@ export interface GenerateLogoArgs {
   framework?: unknown;
   workspace_root?: unknown;
   overwrite?: unknown;
+  /** Opt out of the content-addressed asset cache for this call. */
+  cache?: unknown;
   /**
    * Opt in to the LLM-rewrite pre-stage for this call. See
    * {@link enhancePrompt} for behaviour and failure semantics.
@@ -73,6 +75,7 @@ export async function generateLogo(
   const workspaceArg =
     typeof a.workspace_root === 'string' ? a.workspace_root : undefined;
   const enhanceOptIn = coerceEnhancePromptFlag(a.enhance_prompt);
+  const useCache = a.cache !== false;
 
   const connErr = ensureConnected(ctx);
   if (connErr !== null) return connErr;
@@ -89,13 +92,28 @@ export async function generateLogo(
   if (enhancedCheck.ok !== true) return enhancedCheck;
   const prompt = enhanced.prompt;
 
-  const request = buildImageRequest(prompt);
-  let finalChunk;
-  try {
-    finalChunk = await ctx.relayClient.submitAndAwait(request);
-  } catch (err) {
-    return mapRelayError(err);
+  // Asset cache (Phase 4): identical prompt + unchanged design system
+  // means the generation round-trip can be skipped entirely.
+  if (useCache) {
+    const cached = await lookupCachedAsset(ws.workspaceRoot, prompt);
+    if (cached !== null) {
+      return {
+        ok: true,
+        savedPath: cached.savedPath,
+        mimeType: cached.mimeType,
+        prompt,
+        requestId: `cached-${cached.hash}`,
+        assetCategory: 'logo',
+      };
+    }
   }
+
+  // Submit with the content-policy rephrase safety net (Phase 5).
+  const submitted = await submitImageRequest(ctx, prompt);
+  if (submitted.ok !== true) return submitted;
+  const finalChunk = submitted.finalChunk;
+  const promptUsed = submitted.promptUsed;
+  const requestId = submitted.requestId;
 
   const decoded = decodeFinalChunk(finalChunk);
   if (decoded.ok !== true) return decoded;
@@ -117,12 +135,16 @@ export async function generateLogo(
     return fail('CHATGPT_UNAVAILABLE', `write failed: ${message}`);
   }
 
+  if (useCache) {
+    await recordCachedAsset(ws.workspaceRoot, prompt, target.absolutePath, decoded.mimeType);
+  }
+
   return {
     ok: true,
     savedPath: target.absolutePath,
     mimeType: decoded.mimeType,
-    prompt,
-    requestId: request.requestId,
+    prompt: promptUsed,
+    requestId,
     assetCategory: 'logo',
   };
 }

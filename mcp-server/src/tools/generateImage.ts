@@ -17,21 +17,22 @@
 import { PROMPT_TEMPLATES } from '../promptTemplates.js';
 import {
   atomicWrite,
-  buildImageRequest,
   coerceAssetCategory,
   coerceEnhancePromptFlag,
   coerceFramework,
   decodeFinalChunk,
   ensureConnected,
   fail,
-  mapRelayError,
   prepareImagePrompt,
   resolveTargetPath,
   tryResolveWorkspace,
   validateImagePrompt,
+  submitImageRequest,
   type McpImageResult,
   type McpToolContext,
 } from './common.js';
+import { lookupCachedAsset, recordCachedAsset } from '../assetCache.js';
+import { analyzeDesignContext } from '../designContext.js';
 
 /**
  * Arguments accepted by `generate_image`. Every field is `unknown` at
@@ -44,6 +45,8 @@ export interface GenerateImageArgs {
   framework?: unknown;
   workspace_root?: unknown;
   overwrite?: unknown;
+  /** Opt out of the content-addressed asset cache for this call. */
+  cache?: unknown;
   /**
    * Opt in to the LLM-rewrite pre-stage for this call. When `true`,
    * the templated prompt is run through ChatGPT itself and expanded
@@ -85,6 +88,7 @@ export async function generateImage(
   const workspaceArg =
     typeof a.workspace_root === 'string' ? a.workspace_root : undefined;
   const enhanceOptIn = coerceEnhancePromptFlag(a.enhance_prompt);
+  const useCache = a.cache !== false;
 
   // R31.7: short-circuit on disconnected relay before any side effects.
   const connErr = ensureConnected(ctx);
@@ -94,8 +98,20 @@ export async function generateImage(
   if (ws.ok !== true) return ws;
 
   // Optional rewrite pre-stage. Falls back to `templated` on failure.
+  // UI understanding: append the workspace's design-system brief when
+  // readable so the asset inherits the project's palette / typography.
+  let designBrief = '';
+  try {
+    const design = await analyzeDesignContext(ws.workspaceRoot);
+    designBrief = design.brief;
+  } catch {
+    /* best effort — proceed without design context */
+  }
+  const withDesign =
+    designBrief.length > 0 ? `${templated} ${designBrief}` : templated;
+
   const enhanced = prepareImagePrompt({
-    templated,
+    templated: withDesign,
     kind: 'generic',
     perCallOptIn: enhanceOptIn,
   });
@@ -105,13 +121,28 @@ export async function generateImage(
   if (enhancedCheck.ok !== true) return enhancedCheck;
   const prompt = enhanced.prompt;
 
-  const request = buildImageRequest(prompt);
-  let finalChunk;
-  try {
-    finalChunk = await ctx.relayClient.submitAndAwait(request);
-  } catch (err) {
-    return mapRelayError(err);
+  // Asset cache (Phase 4): identical prompt + unchanged design system
+  // means the generation round-trip can be skipped entirely.
+  if (useCache) {
+    const cached = await lookupCachedAsset(ws.workspaceRoot, prompt);
+    if (cached !== null) {
+      return {
+        ok: true,
+        savedPath: cached.savedPath,
+        mimeType: cached.mimeType,
+        prompt,
+        requestId: `cached-${cached.hash}`,
+        assetCategory: assetCategory,
+      };
+    }
   }
+
+  // Submit with the content-policy rephrase safety net (Phase 5).
+  const submitted = await submitImageRequest(ctx, prompt);
+  if (submitted.ok !== true) return submitted;
+  const finalChunk = submitted.finalChunk;
+  const promptUsed = submitted.promptUsed;
+  const requestId = submitted.requestId;
 
   const decoded = decodeFinalChunk(finalChunk);
   if (decoded.ok !== true) return decoded;
@@ -134,12 +165,16 @@ export async function generateImage(
     return fail('CHATGPT_UNAVAILABLE', `write failed: ${message}`);
   }
 
+  if (useCache) {
+    await recordCachedAsset(ws.workspaceRoot, prompt, target.absolutePath, decoded.mimeType);
+  }
+
   return {
     ok: true,
     savedPath: target.absolutePath,
     mimeType: decoded.mimeType,
-    prompt,
-    requestId: request.requestId,
+    prompt: promptUsed,
+    requestId,
     assetCategory,
   };
 }

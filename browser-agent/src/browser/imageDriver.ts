@@ -1,17 +1,17 @@
 /**
  * Image-driver helpers for the Browser Agent.
  *
- * Drives ChatGPT_Pro through a DALL-E / GPT-Image-1 round-trip and
- * returns the result as a base64-encoded payload that fits the closed-
- * enum `mediaType` field on the wire (`image/png`, `image/jpeg`,
- * `image/webp`, `image/gif`).
+ * Drives ChatGPT through a DALL-E / GPT-Image-1 round-trip and returns
+ * the result as a base64-encoded payload that fits the closed-enum
+ * `mediaType` field on the wire (`image/png`, `image/jpeg`, `image/webp`,
+ * `image/gif`).
  *
  * Implements R10.1 (image-prompt path entry), R10.2 (locate generated
  * image), R10.3 (extract bytes and base64 encode), R10.4 (final
  * response shape `{ mediaType, base64 }`), R10.5 (deadline →
- * `IMAGE_TIMEOUT`), R10.6 (DALL-E refusal text → `CONTENT_POLICY`),
- * R10.7 (prompt validation up-front; never touch the page on invalid
- * input), R10.8 (page unreachable/load failure → `CHATGPT_UNAVAILABLE`).
+ * `IMAGE_TIMEOUT`), R10.6 (refusal text → `CONTENT_POLICY`), R10.7
+ * (prompt validation up-front; never touch the page on invalid input),
+ * R10.8 (page unreachable/load failure → `CHATGPT_UNAVAILABLE`).
  *
  * Detection strategy
  * ------------------
@@ -20,70 +20,54 @@
  *
  *  1. **Network interception (primary).** A `page.on('response')`
  *     handler installed for the duration of the call grabs the bytes
- *     of every `image/(png|jpeg|webp|gif)` response delivered after
- *     prompt submission. This bypasses the DOM entirely and is
- *     robust against ChatGPT's portal-rendered image elements,
- *     `loading="lazy"` zero-natural-dimension placeholders, and
- *     opaque `<canvas>` previews. The image bytes are encoded in
- *     Node directly without a CDP round-trip.
- *  2. **In-page MutationObserver (fallback).** Watches `<img>`
- *     additions anywhere in the document; when an image with a
- *     qualifying `src` (`https:` / `blob:` / `data:image/`) and
- *     dimensions ≥ 256 px appears, the driver fetches its bytes via
+ *     of every qualifying `image/*` response delivered after prompt
+ *     submission. This bypasses the DOM entirely and is robust against
+ *     portal-rendered image elements and opaque `<canvas>` previews.
+ *  2. **In-page MutationObserver (fallback).** Watches `<img>` additions
+ *     anywhere in the document; when an image with a qualifying `src`
+ *     and dimensions ≥ 256 px appears, the driver fetches its bytes via
  *     `page.evaluate(fetch)` so the request inherits page cookies.
- *  3. **Periodic DOM scan (safety net).** Every poll cycle the
- *     driver also queries the most-recent assistant turn for any
- *     qualifying `<img>`, in case the observer was GC'd by a
- *     navigation.
+ *  3. **Periodic last-turn scan (safety net).** The last-turn reader
+ *     also reports a qualifying image inside the most-recent assistant
+ *     turn.
  *
- * Why interception is primary: ChatGPT serves DALL-E / GPT-Image-1
- * outputs from `files.oaiusercontent.com` (or equivalent backend
- * routes). The browser fetches those bytes once, then renders them
- * via a blob URL inside an `<img>`. Our `response` handler captures
- * the original network response — the same bytes the page renders —
- * milliseconds after the underlying transfer completes, with no DOM
- * race conditions.
- *
- * Why we still keep the MutationObserver path: production puppeteer
- * pages always expose `on()`, but unit-test stubs do not. Falling
- * back to the in-page observer keeps the unit tests in
- * `test/imageDriver.test.ts` green without mocking the network layer.
+ * Adaptive stabilization
+ * ---------------------
+ * The original implementation waited a FIXED 55 seconds after the first
+ * captured image before returning — even when the image had fully
+ * arrived in 6 seconds, adding ~49 s of dead latency to every single
+ * generation. The replacement is a quiet-window: after each larger
+ * capture the driver waits `stabilizationQuietMs` (default 2500 ms) for
+ * a higher-quality replacement; the moment the quiet window elapses with
+ * no improvement, the best capture is returned. Progressive-preview
+ * pipelines (small preview first, full asset a few seconds later) are
+ * still handled — the full asset resets the quiet clock when it lands.
  *
  * @packageDocumentation
  */
 
 import { SEL } from './selectors.js';
 import { typeAndSubmitChat, type ChatDriverPage } from './chatDriver.js';
+import { readLastTurnState } from './turnReader.js';
 import { logAgentEvent } from '../log/logger.js';
 import type { ErrorCode, RequestId } from '@kiro-gpt-bridge/shared';
 
 /**
  * Directive prefix prepended to the user prompt before submission.
- * ChatGPT_Pro routes prompts beginning with this phrase to the image
- * generation tool. Implements R10.1.
+ * ChatGPT routes image-intent prompts to its image tool. Implements
+ * R10.1.
  */
-const DALLE_PREFIX = 'Please generate an image with DALL-E: ';
+const DALLE_PREFIX = 'Generate an image: ';
 
 /** Maximum prompt length accepted by the image path. R10.7. */
 const MAX_PROMPT_LEN = 4000;
 
 /**
- * Minimum byte size for a network image response to count as the
- * generated output. Below this threshold the response is almost
- * certainly an avatar, favicon, or UI sprite. 50 KB is comfortably
- * above ChatGPT's UI assets and well below the smallest typical
- * DALL-E output (~150–200 KB at 512 × 512).
- */
-/**
- * Soft lower-bound retained for the relaxed DOM-fallback path. The
- * strict {@link MIN_NETWORK_IMAGE_BYTES_STRICT} cutoff applies to the
- * primary network-interception path; this looser threshold is used
- * only as a documentation marker and is not currently consumed by
- * runtime code (kept to preserve the historical numeric reference).
+ * Soft lower-bound retained for the relaxed DOM-fallback path.
  *
  * @internal
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- documentation marker; kept intentionally per R10.5
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- documentation marker
 const MIN_NETWORK_IMAGE_BYTES = 50_000;
 
 /**
@@ -96,8 +80,7 @@ const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 
 /**
  * Substrings that disqualify a URL from being treated as the
- * generated image. Avatars, profile pictures, sprite atlases, and
- * placeholder PNGs all match these. The check is case-insensitive.
+ * generated image. The check is case-insensitive.
  */
 const URL_DENYLIST = [
   '/avatar',
@@ -117,25 +100,16 @@ const URL_DENYLIST = [
 
 /**
  * Minimum byte size for a network image response to count as the
- * generated output. Generated images from DALL-E / GPT-Image-1 are
- * typically 100 KB – 5 MB at the resolutions ChatGPT serves; UI
- * sprites and inline icons are virtually always under 80 KB. 100 KB
- * is the cleanest threshold without being so high it rejects small
- * generated images.
+ * generated output. Generated images are typically 100 KB – 5 MB; UI
+ * sprites and inline icons are virtually always under 80 KB.
  */
 const MIN_NETWORK_IMAGE_BYTES_STRICT = 100_000;
 
 /**
- * Minimum pixel dimension required for a captured image to count as
- * the generated output. DALL-E / GPT-Image-1 today serves outputs at
- * 1024 × 1024 (square) or 941 × 1672 / 1672 × 941 (portrait /
- * landscape mobile aspect). 700 is the cleanest cutoff that admits
- * every generated image we have observed while rejecting every
- * plausible UI sprite (avatars/icons cap at ~256 px even when
- * resvg-rendered, and ChatGPT's bundled location-pin sprite
- * specifically renders at 1024 × 1024 — so we additionally enforce
- * a URL allowlist match for the chatgpt.com backend-api estuary
- * delivery path before accepting).
+ * Minimum pixel dimension required for a captured PNG to count as the
+ * generated output on the network path. 700 admits every generated
+ * image we have observed while rejecting every plausible UI sprite
+ * (avatars/icons cap at ~256 px even when resvg-rendered).
  */
 const MIN_GENERATED_PIXEL_DIM = 700;
 
@@ -144,16 +118,10 @@ const MIN_GENERATED_PIXEL_DIM = 700;
  * delivery channel. Observed in production:
  *
  *   - `chatgpt.com/backend-api/estuary/content?id=file_...` — the
- *     user-content delivery endpoint; this is where DALL-E /
- *     GPT-Image-1 outputs land for chat.openai.com / chatgpt.com.
- *   - `files.oaiusercontent.com/...` — OpenAI's CDN, used for
- *     attachments.
+ *     user-content delivery endpoint.
+ *   - `files.oaiusercontent.com/...` — OpenAI's CDN.
  *   - `oaidalleapiprodscus.blob.core.windows.net/...` — Azure blob
  *     fallback for older DALL-E 3 deliveries.
- *
- * Matching against this allowlist eliminates UI sprites (which live
- * under `/static/` or `_next/image`) from the candidate pool even
- * before we read the body.
  */
 const URL_ALLOWLIST = [
   '/backend-api/estuary/content',
@@ -164,32 +132,22 @@ const URL_ALLOWLIST = [
 
 /**
  * Minimum width/height in CSS pixels for a DOM-discovered `<img>` to
- * count as the generated image. Used by the MutationObserver fallback
- * path; the network-interception path uses byte size + PNG dimension
- * inspection instead. 1024 matches {@link MIN_GENERATED_PIXEL_DIM}
- * and rejects every plausible UI sprite while admitting today's
- * DALL-E / GPT-Image-1 outputs.
+ * count as the generated image on the DOM-only fallback paths.
  */
 const MIN_IMAGE_DIM_PX = 1024;
 
 /**
  * Default poll interval used when the in-page MutationObserver has
- * already populated `window.__kiroImage`. Kept short (500 ms) because
- * each tick is one property read; the observer does the heavy lifting.
+ * already populated `window.__kiroImage`.
  */
-const DEFAULT_POLL_INTERVAL_MS = 500;
+const DEFAULT_POLL_INTERVAL_MS = 300;
 
 /**
- * Stabilization window in milliseconds. After the first qualifying
- * network image is captured, the driver waits this long for a
- * higher-quality replacement to arrive. ChatGPT's image pipeline
- * often delivers a low-resolution progressive preview first, then
- * the final full-quality image 3–8 seconds later from the same
- * estuary endpoint. 10 s is generous enough to catch the final
- * delivery without adding noticeable latency when only one image
- * arrives (the timeout simply expires and we return the first).
+ * Default quiet-window for adaptive stabilization. After each larger
+ * capture, wait this long for a higher-quality replacement before
+ * returning the best image.
  */
-const IMAGE_STABILIZATION_MS = 55_000;
+const DEFAULT_STABILIZATION_QUIET_MS = 2_500;
 
 /** Default deadline for image generation. R10.5 (≥ 180 s). */
 const DEFAULT_TIMEOUT_MS = 600_000;
@@ -201,8 +159,20 @@ const DEFAULT_TIMEOUT_MS = 600_000;
 export interface ImageDriverOptions {
   /** Total deadline for image generation in ms. Default 600 000. */
   timeoutMs?: number;
-  /** Poll interval in ms for fallback DOM checks. Default 500. */
+  /** Poll interval in ms for fallback DOM checks. Default 300. */
   pollIntervalMs?: number;
+  /**
+   * Quiet-window in ms for adaptive stabilization. Default 2500. Set
+   * `0` to return the first qualifying capture immediately.
+   */
+  stabilizationQuietMs?: number;
+  /**
+   * Assistant-turn count captured BEFORE the prompt was submitted.
+   * Refusal text in turns at or below this index belongs to previous
+   * requests and is ignored. When omitted, any last-turn refusal is
+   * treated as this request's.
+   */
+  baselineTurnCount?: number;
   /** Sleep injection for tests. Default `setTimeout`-based. */
   sleep?: (ms: number) => Promise<void>;
   /** Clock injection for tests. Default `Date.now`. */
@@ -239,9 +209,7 @@ export type ImageDriverResult = ImageDriverSuccess | ImageDriverFailure;
 
 /**
  * Minimal structural description of a puppeteer `HTTPResponse` used by
- * the network-interception path. Defined here (rather than imported
- * from puppeteer) so the unit-test stubs in `test/imageDriver.test.ts`
- * can omit the `on`/`off` surface entirely without compiler errors.
+ * the network-interception path.
  */
 export interface ImageDriverResponse {
   /** Final URL of the response (after redirects). */
@@ -257,13 +225,9 @@ export interface ImageDriverResponse {
 /**
  * Subset of puppeteer's `Page` surface used by {@link generateImage}.
  *
- * Extends {@link ChatDriverPage} with the `evaluate` / `url` / `goto`
- * methods needed for image extraction and reachability probing, plus
- * optional `on` / `off` hooks for network response interception.
- *
- * `on` and `off` are optional because the unit-test stub in
- * `test/imageDriver.test.ts` cannot easily implement them; production
- * puppeteer pages always provide both.
+ * Extends {@link ChatDriverPage} with the `evaluate` / `url` methods
+ * needed for image extraction and reachability probing, plus optional
+ * `on` / `off` hooks for network response interception.
  */
 export interface ImageDriverPage extends ChatDriverPage {
   /**
@@ -291,7 +255,7 @@ export interface ImageDriverPage extends ChatDriverPage {
 }
 
 /**
- * Submit an image-generation prompt to ChatGPT_Pro and return the
+ * Submit an image-generation prompt to ChatGPT and return the
  * generated image as a base64-encoded payload, or a failure with a
  * closed-enum {@link ErrorCode}. Implements R10.1 through R10.8.
  */
@@ -303,6 +267,7 @@ export async function generateImage(
 ): Promise<ImageDriverResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const quietMs = opts.stabilizationQuietMs ?? DEFAULT_STABILIZATION_QUIET_MS;
   const sleep =
     opts.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -347,13 +312,11 @@ export async function generateImage(
   }
 
   // Step 3: install the network interceptor BEFORE submission so it
-  // captures responses that arrive milliseconds after submit. The
-  // interceptor's lifecycle is bounded to this call — torn down in
-  // the `finally` block.
+  // captures responses that arrive milliseconds after submit.
   const networkCapture = installNetworkInterceptor(page, requestId);
 
   try {
-    // Step 4: submit the prompt with the DALL-E directive prefix.
+    // Step 4: submit the prompt with the image directive prefix.
     logAgentEvent({
       eventType: 'agent.image_submit',
       requestId,
@@ -374,18 +337,14 @@ export async function generateImage(
     }
 
     // Step 5: install the in-page MutationObserver as fallback. Errors
-    // here are non-fatal; the per-tick DOM scan still works.
+    // here are non-fatal; the per-tick last-turn scan still works.
     await installImageObserver(page, MIN_IMAGE_DIM_PX);
 
-    // Step 6: poll three sources — network capture, DOM observer, and
-    // refusal text — until one resolves or the deadline expires.
-    // When a network hit arrives, enter a stabilization window: wait
-    // up to IMAGE_STABILIZATION_MS for a larger (higher-quality) image
-    // to supersede the first. ChatGPT's pipeline often delivers a
-    // progressive preview before the final full-quality image.
+    // Step 6: single poll loop — drain network captures, watch the
+    // quiet window, check refusal text, fall back to DOM sources.
     const startedAt = now();
     let bestNetHit: { mediaType: ImageMime; base64: string; byteLength: number } | null = null;
-    let stabilizationStart: number | null = null;
+    let lastImprovementAt: number | null = null;
 
     while (now() - startedAt < timeoutMs) {
       // Drain all available network captures, keeping the largest.
@@ -393,8 +352,7 @@ export async function generateImage(
       while (netHit !== null) {
         if (bestNetHit === null || netHit.byteLength > bestNetHit.byteLength) {
           bestNetHit = netHit;
-          // Reset stabilization clock on each improvement.
-          stabilizationStart = now();
+          lastImprovementAt = now();
           logAgentEvent({
             eventType: 'agent.image_captured',
             requestId,
@@ -406,62 +364,39 @@ export async function generateImage(
         netHit = networkCapture.consume();
       }
 
-      // If we have a candidate and the stabilization window has elapsed,
-      // return the best image we captured.
-      if (bestNetHit !== null && stabilizationStart !== null) {
-        if (now() - stabilizationStart >= IMAGE_STABILIZATION_MS) {
-          logAgentEvent({
-            eventType: 'agent.image_captured',
-            requestId,
-            source: 'network',
-            bytes: bestNetHit.byteLength,
-            note: 'final (stabilized)',
-          });
-          return { ok: true, mediaType: bestNetHit.mediaType, base64: bestNetHit.base64 };
-        }
+      // Quiet window elapsed with no larger replacement → return best.
+      if (
+        bestNetHit !== null &&
+        lastImprovementAt !== null &&
+        now() - lastImprovementAt >= quietMs
+      ) {
+        logAgentEvent({
+          eventType: 'agent.image_captured',
+          requestId,
+          source: 'network',
+          bytes: bestNetHit.byteLength,
+          note: 'final (stabilized)',
+        });
+        return { ok: true, mediaType: bestNetHit.mediaType, base64: bestNetHit.base64 };
       }
 
       await sleep(pollIntervalMs);
 
-      const refusal = await detectContentPolicyRefusal(page);
-      if (refusal !== null) {
+      // Refusal detection — scoped to turns that appeared after the
+      // pre-submit baseline so old refusals cannot poison this request.
+      const state = await readLastTurnState(page);
+      if (
+        state !== null &&
+        state.errorText !== null &&
+        (opts.baselineTurnCount === undefined ||
+          state.turnCount > opts.baselineTurnCount)
+      ) {
         logAgentEvent({
           eventType: 'agent.error',
           errorCategory: 'content_policy',
           requestId,
         });
-        return { ok: false, errorCode: 'CONTENT_POLICY', message: refusal };
-      }
-
-      // Drain again after sleep — new responses may have arrived.
-      let netHit2 = networkCapture.consume();
-      while (netHit2 !== null) {
-        if (bestNetHit === null || netHit2.byteLength > bestNetHit.byteLength) {
-          bestNetHit = netHit2;
-          stabilizationStart = now();
-          logAgentEvent({
-            eventType: 'agent.image_captured',
-            requestId,
-            source: 'network',
-            bytes: netHit2.byteLength,
-            note: 'candidate (stabilizing)',
-          });
-        }
-        netHit2 = networkCapture.consume();
-      }
-
-      // Re-check stabilization after draining post-sleep captures.
-      if (bestNetHit !== null && stabilizationStart !== null) {
-        if (now() - stabilizationStart >= IMAGE_STABILIZATION_MS) {
-          logAgentEvent({
-            eventType: 'agent.image_captured',
-            requestId,
-            source: 'network',
-            bytes: bestNetHit.byteLength,
-            note: 'final (stabilized)',
-          });
-          return { ok: true, mediaType: bestNetHit.mediaType, base64: bestNetHit.base64 };
-        }
+        return { ok: false, errorCode: 'CONTENT_POLICY', message: state.errorText };
       }
 
       // DOM fallback — only used if no network candidate is available.
@@ -470,10 +405,10 @@ export async function generateImage(
       if (bestNetHit !== null) continue;
 
       const observed = await readObserverResult(page);
-      const hit = observed ?? (await scanForImage(page, MIN_IMAGE_DIM_PX));
-      if (hit === null) continue;
+      const domSrc = state?.imageUrl ?? observed?.src ?? (await scanForImage(page, MIN_IMAGE_DIM_PX))?.src ?? null;
+      if (domSrc === null) continue;
 
-      const fetched = await fetchAndEncode(page, hit.src);
+      const fetched = await fetchAndEncode(page, domSrc);
       if (fetched === null) {
         await clearObserverResult(page);
         continue;
@@ -492,9 +427,9 @@ export async function generateImage(
       return { ok: true, mediaType, base64: fetched.base64 };
     }
 
-    // If we captured at least one network image but the stabilization
-    // window never completed (e.g., timeout fired during stabilization),
-    // return the best candidate we have rather than failing.
+    // If we captured at least one network image but the quiet window
+    // never completed before the deadline, return the best candidate
+    // we have rather than failing.
     if (bestNetHit !== null) {
       logAgentEvent({
         eventType: 'agent.image_captured',
@@ -531,9 +466,7 @@ export async function generateImage(
 interface NetworkCapture {
   /**
    * Return the next captured image and remove it from the queue, or
-   * `null` when nothing has been captured yet. The driver consumes
-   * captures as they arrive so a second image (e.g., a follow-up
-   * regeneration) does not stomp the first.
+   * `null` when nothing has been captured yet.
    */
   consume(): {
     mediaType: ImageMime;
@@ -589,9 +522,7 @@ function installNetworkInterceptor(
     const lowerUrl = url.toLowerCase();
 
     // Allowlist gate — must come from a known generated-image
-    // delivery endpoint. Empirically observed in production:
-    // `chatgpt.com/backend-api/estuary/content?id=file_...` for the
-    // current ChatGPT_Pro pipeline.
+    // delivery endpoint.
     let allowed = false;
     for (const allowedFragment of URL_ALLOWLIST) {
       if (lowerUrl.includes(allowedFragment)) {
@@ -652,7 +583,7 @@ function installNetworkInterceptor(
       return;
     }
 
-    // Pixel-dimension check — generated images are ≥ 1024 px on both
+    // Pixel-dimension check — generated images are ≥ 700 px on both
     // axes; UI icons that survive the size filter are smaller.
     if (mediaType === 'image/png') {
       const dims = readPngDimensions(bytes);
@@ -671,10 +602,8 @@ function installNetworkInterceptor(
         return;
       }
     }
-    // Non-PNG MIMEs (jpeg/webp/gif) — generated images aren't served
-    // as these today; if we ever start receiving one we can add a
-    // dimension parser per format. For now the byte-size filter
-    // (≥ 100 KB) handles them.
+    // Non-PNG MIMEs (jpeg/webp/gif) — the byte-size filter (≥ 100 KB)
+    // handles them.
 
     logAgentEvent({
       eventType: 'agent.image_captured',
@@ -731,8 +660,6 @@ function encodeBase64(bytes: Uint8Array): string {
     const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length));
     binary += String.fromCharCode.apply(null, Array.from(slice));
   }
-  // `btoa` is the browser primitive; not present in Node, but the
-  // primary path above handles Node already.
   const g = globalThis as unknown as { btoa?: (s: string) => string };
   if (typeof g.btoa === 'function') return g.btoa(binary);
   throw new Error('no base64 encoder available');
@@ -742,11 +669,6 @@ function encodeBase64(bytes: Uint8Array): string {
  * Read the pixel width and height encoded in the IHDR chunk of a PNG
  * file. Returns `null` if the buffer is too short or does not start
  * with the canonical 8-byte PNG signature.
- *
- * The PNG layout is fixed: bytes 0–7 carry the signature, bytes 8–11
- * a chunk length, bytes 12–15 the chunk type (which must be 'IHDR'),
- * bytes 16–19 the width, and bytes 20–23 the height — all integers
- * stored big-endian.
  */
 function readPngDimensions(
   bytes: Uint8Array,
@@ -765,7 +687,7 @@ function readPngDimensions(
   ) {
     return null;
   }
-  // IHDR type at bytes 12-15: 'I','H','D','R' = 0x49 0x48 0x44 0x52
+  // IHDR type at bytes 12-15: 'I','H','D','R'
   if (
     bytes[12] !== 0x49 ||
     bytes[13] !== 0x48 ||
@@ -846,15 +768,10 @@ async function installImageObserver(
         }
       };
 
-      const initial = document.querySelectorAll('img');
       // INTENTIONALLY DO NOT consider() pre-existing <img> elements.
       // The DOM-fallback path is for *newly added* generated images;
       // any image already in the DOM at observer-install time is a UI
-      // asset (favicon, account avatar, sprite, location-pin icon),
-      // never the DALL-E output we are about to ask for. We must wait
-      // for the MutationObserver to fire on a real addition.
-      void initial;
-
+      // asset, never the output we are about to ask for.
       const observer = new MutationObserver((mutations) => {
         for (const m of mutations) {
           for (let i = 0; i < m.addedNodes.length; i += 1) {
@@ -1040,40 +957,5 @@ function normalizeMime(raw: string): ImageMime | null {
   if (lower === 'image/jpeg' || lower === 'image/jpg') return 'image/jpeg';
   if (lower === 'image/webp') return 'image/webp';
   if (lower === 'image/gif') return 'image/gif';
-  return null;
-}
-
-/**
- * Look for DALL-E content-policy refusal text inside the most-recent
- * assistant turn.
- */
-async function detectContentPolicyRefusal(
-  page: ImageDriverPage,
-): Promise<string | null> {
-  for (const selector of SEL.ASSISTANT_MESSAGE_BODY) {
-    try {
-      const text = await page.evaluate((...args: unknown[]): string | null => {
-        const sel = args[0] as string;
-        const el = document.querySelector(sel);
-        if (el === null) return null;
-        const txt = (el as HTMLElement).textContent ?? '';
-        const lower = txt.toLowerCase();
-        if (
-          lower.includes('content policy') ||
-          lower.includes("can't create that") ||
-          lower.includes('cannot create that') ||
-          lower.includes('against my guidelines') ||
-          lower.includes("can't generate that") ||
-          lower.includes('cannot generate that')
-        ) {
-          return txt.trim();
-        }
-        return null;
-      }, selector);
-      if (text !== null) return text;
-    } catch {
-      // Try next fallback selector.
-    }
-  }
   return null;
 }

@@ -49,6 +49,7 @@ describe('Property 16: Keystroke jitter range', () => {
         async (prompt) => {
           const page = createStubPage();
           const result = await typeAndSubmitChat(page, prompt, 'req-jitter-test', {
+            mode: 'human',
             sleep: async (_ms: number) => {},
           });
 
@@ -76,6 +77,7 @@ describe('Property 16: Keystroke jitter range', () => {
         async (prompt, fixedRandom) => {
           const page = createStubPage();
           const result = await typeAndSubmitChat(page, prompt, 'req-jitter-fixed', {
+            mode: 'human',
             random: () => fixedRandom,
             sleep: async (_ms: number) => {},
           });
@@ -97,6 +99,7 @@ describe('Property 16: Keystroke jitter range', () => {
     const longPrompt = 'a'.repeat(10000);
 
     const result = await typeAndSubmitChat(page, longPrompt, 'req-ks-test', {
+      mode: 'human',
       sleep: async (_ms: number) => {},
     });
 

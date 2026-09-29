@@ -485,3 +485,152 @@ export function prepareImagePrompt(
 export function coerceEnhancePromptFlag(value: unknown): boolean {
   return value === true;
 }
+
+// ─── Submit with content-policy rephrase (Phase 5) ─────────────────────────
+
+/**
+ * Build the wire-shaped {@link Request} for a chat round-trip. Used by
+ * {@link submitImageRequest} to have ChatGPT rewrite a refused prompt.
+ */
+export function buildChatRequest(prompt: string): Request {
+  return {
+    protocolVersion: 1,
+    requestId: randomUUID(),
+    clientId: 'mcp',
+    sessionId: 'mcp',
+    type: 'chat',
+    prompt,
+    submittedAt: Date.now(),
+    origin: 'mcp',
+  };
+}
+
+/** Success shape of {@link submitImageRequest}. */
+export interface SubmitImageSuccess {
+  ok: true;
+  /** Final chunk from the (possibly retried) image request. */
+  finalChunk: StreamChunk;
+  /** The prompt that actually produced `finalChunk`. */
+  promptUsed: string;
+  /** Wire requestId of the image request that produced the chunk. */
+  requestId: string;
+  /** True when the prompt was policy-rephrased before the winning attempt. */
+  rephrased: boolean;
+}
+
+/**
+ * Read the policy-retry budget from the environment. Default 1 (one
+ * rephrase + one retry). Clamped to 0..2.
+ */
+export function readPolicyRetryBudget(): number {
+  const raw = process.env.KIRO_GPT_MCP_POLICY_RETRIES;
+  if (raw === undefined || raw === '') return 1;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.max(0, Math.min(2, parsed));
+}
+
+/**
+ * Submit an image request with one content-policy safety net: on a
+ * `CONTENT_POLICY` refusal, a chat round-trip asks ChatGPT to rewrite
+ * the prompt policy-safe (preserving intent), and the image is retried
+ * once with the rewritten prompt.
+ *
+ * Never throws — transport failures surface as {@link McpFailure} via
+ * {@link mapRelayError}; a failed rephrase degrades to the original
+ * refusal chunk (the caller surfaces it unchanged).
+ */
+export async function submitImageRequest(
+  ctx: McpToolContext,
+  prompt: string,
+): Promise<SubmitImageSuccess | McpFailure> {
+  const budget = readPolicyRetryBudget();
+
+  const request = buildImageRequest(prompt);
+  let finalChunk: StreamChunk;
+  try {
+    finalChunk = await ctx.relayClient.submitAndAwait(request);
+  } catch (err) {
+    return mapRelayError(err);
+  }
+
+  if (finalChunk.errorCode !== 'CONTENT_POLICY' || budget === 0) {
+    return {
+      ok: true,
+      finalChunk,
+      promptUsed: prompt,
+      requestId: request.requestId,
+      rephrased: false,
+    };
+  }
+
+  const rewritten = await rephraseViaChat(ctx, prompt);
+  if (rewritten === null) {
+    return {
+      ok: true,
+      finalChunk,
+      promptUsed: prompt,
+      requestId: request.requestId,
+      rephrased: false,
+    };
+  }
+
+  const retryRequest = buildImageRequest(rewritten);
+  try {
+    finalChunk = await ctx.relayClient.submitAndAwait(retryRequest);
+  } catch (err) {
+    return mapRelayError(err);
+  }
+  return {
+    ok: true,
+    finalChunk,
+    promptUsed: rewritten,
+    requestId: retryRequest.requestId,
+    rephrased: true,
+  };
+}
+
+/**
+ * Ask ChatGPT (via a chat request) to rewrite `prompt` policy-safe.
+ * Returns the sanitized rewrite, or `null` when the rewrite failed,
+ * was empty, or did not change the prompt.
+ */
+async function rephraseViaChat(ctx: McpToolContext, prompt: string): Promise<string | null> {
+  const clamped = prompt.slice(0, 2000);
+  const instruction =
+    'Rewrite the following image-generation prompt so it complies with content policy ' +
+    'while preserving the original intent, subject, and style. Remove or soften any ' +
+    'elements that could trigger a refusal. Reply with ONLY the rewritten prompt — ' +
+    'no quotes, no explanation. Prompt: ' + clamped;
+  try {
+    const chunk = await ctx.relayClient.submitAndAwait(buildChatRequest(instruction));
+    if (chunk.errorCode !== undefined) return null;
+    const text = typeof chunk.text === 'string' ? chunk.text : '';
+    return sanitizeRewrittenPrompt(text, prompt);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clean a model-rewritten prompt: strip wrapping quotes and label
+ * prefixes, collapse to one line, clamp to the 4000-char wire budget.
+ * Returns `null` when nothing usable remains (or the rewrite is
+ * identical to the original — retrying unchanged wastes a generation).
+ */
+export function sanitizeRewrittenPrompt(raw: string, original: string): string | null {
+  let text = raw.trim();
+  if (text.length === 0) return null;
+  if (
+    (text.startsWith('"') && text.endsWith('"') && text.length >= 2) ||
+    (text.startsWith("'") && text.endsWith("'") && text.length >= 2)
+  ) {
+    text = text.slice(1, -1).trim();
+  }
+  text = text.replace(/^(rewritten\s+prompt|prompt)\s*:\s*/i, '');
+  text = text.replace(/\s*\r?\n\s*/g, ' ').trim();
+  if (text.length === 0) return null;
+  if (text.length > 4000) text = text.slice(0, 4000);
+  if (text === original) return null;
+  return text;
+}

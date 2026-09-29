@@ -1,19 +1,22 @@
 /**
- * MCP tool handler: `generate_ui_mockup`.
+ * MCP tool handler: `generate_og_image`.
  *
- * Implements R31.3 (UI mockup tool), R31.4 (template-built prompt), R31.6
- * (success shape), R31.7 (closed-enum error codes; no file write on
- * failure).
+ * Phase 3 asset tool — Open Graph / social-card image at the canonical
+ * 1200x630 size. The composition keeps the left third headline-safe
+ * because the caller overlays real text in code (the negative anchors
+ * forbid embedded text, which image models render as garbled glyphs).
  *
  * Accepted arguments:
- *   - component_description  (string, required)
- *   - viewport               (string, optional, default 'desktop 1440x900')
- *   - framework              (Framework, default 'unknown')
- *   - workspace_root         (string, overrides KIRO_GPT_MCP_WORKSPACE)
- *   - overwrite              (boolean, default false)
+ *   - description      (string, required)
+ *   - style            (string, optional extra style directive)
+ *   - framework        (Framework, default 'unknown')
+ *   - workspace_root   (string, overrides KIRO_GPT_MCP_WORKSPACE)
+ *   - overwrite        (boolean, default false)
+ *   - enhance_prompt   (boolean, opt-in single-turn rewrite)
  */
 
-import { PROMPT_TEMPLATES } from '../promptTemplates.js';
+import { composePrompt } from '../promptComposer.js';
+import { analyzeDesignContext } from '../designContext.js';
 import {
   atomicWrite,
   coerceEnhancePromptFlag,
@@ -21,7 +24,6 @@ import {
   decodeFinalChunk,
   ensureConnected,
   fail,
-  prepareImagePrompt,
   resolveTargetPath,
   tryResolveWorkspace,
   validateImagePrompt,
@@ -30,48 +32,34 @@ import {
   type McpToolContext,
 } from './common.js';
 import { lookupCachedAsset, recordCachedAsset } from '../assetCache.js';
-import { analyzeDesignContext } from '../designContext.js';
 
-/** Arguments for `generate_ui_mockup`. */
-export interface GenerateUiMockupArgs {
-  component_description?: unknown;
-  viewport?: unknown;
+/** Arguments for `generate_og_image`. */
+export interface GenerateOgImageArgs {
+  description?: unknown;
+  style?: unknown;
   framework?: unknown;
   workspace_root?: unknown;
   overwrite?: unknown;
   /** Opt out of the content-addressed asset cache for this call. */
   cache?: unknown;
-  /**
-   * Opt in to the LLM-rewrite pre-stage for this call. See
-   * {@link enhancePrompt} for behaviour and failure semantics.
-   */
   enhance_prompt?: unknown;
 }
 
 /**
- * Run the `generate_ui_mockup` tool. Implements R31.3 (mockup), R31.4,
- * R31.6, R31.7.
+ * Run the `generate_og_image` tool. Files land in the framework's base
+ * directory (the `other` category) with an `og-` filename stem so the
+ * card is easy to reference from `<meta property="og:image">`.
  */
-export async function generateUiMockup(
-  args: GenerateUiMockupArgs | undefined,
+export async function generateOgImage(
+  args: GenerateOgImageArgs | undefined,
   ctx: McpToolContext,
 ): Promise<McpImageResult> {
   const a = args ?? {};
 
-  if (
-    typeof a.component_description !== 'string' ||
-    a.component_description.trim().length === 0
-  ) {
-    return fail(
-      'INVALID_PROMPT',
-      'component_description is required and must be a non-empty string',
-    );
+  if (typeof a.description !== 'string' || a.description.trim().length === 0) {
+    return fail('INVALID_PROMPT', 'description is required and must be a non-empty string');
   }
-  const viewport = typeof a.viewport === 'string' ? a.viewport : undefined;
-
-  const templated = PROMPT_TEMPLATES.uiMockup(a.component_description, viewport);
-  const promptCheck = validateImagePrompt(templated);
-  if (promptCheck.ok !== true) return promptCheck;
+  const style = typeof a.style === 'string' ? a.style : undefined;
 
   const framework = coerceFramework(a.framework);
   const overwrite = a.overwrite === true;
@@ -86,26 +74,17 @@ export async function generateUiMockup(
   const ws = tryResolveWorkspace(ctx, workspaceArg);
   if (ws.ok !== true) return ws;
 
-  // UI understanding: append the workspace's design-system brief when
-  // readable so the asset inherits the project's palette / typography.
-  let designBrief = '';
-  try {
-    const design = await analyzeDesignContext(ws.workspaceRoot);
-    designBrief = design.brief;
-  } catch {
-    /* best effort — proceed without design context */
-  }
-  const withDesign =
-    designBrief.length > 0 ? `${templated} ${designBrief}` : templated;
+  const design = await analyzeDesignContext(ws.workspaceRoot);
+  const aspect = 'Social card 1200x630, left third reserved as headline-safe negative space.';
 
-  const enhanced = prepareImagePrompt({
-    templated: withDesign,
-    kind: 'ui',
-    perCallOptIn: enhanceOptIn,
+  const prompt = composePrompt({
+    kind: 'og',
+    specifics: `${a.description} ${aspect}`,
+    design,
+    style,
   });
-  const enhancedCheck = validateImagePrompt(enhanced.prompt);
-  if (enhancedCheck.ok !== true) return enhancedCheck;
-  const prompt = enhanced.prompt;
+  const promptCheck = validateImagePrompt(prompt);
+  if (promptCheck.ok !== true) return promptCheck;
 
   // Asset cache (Phase 4): identical prompt + unchanged design system
   // means the generation round-trip can be skipped entirely.
@@ -118,7 +97,7 @@ export async function generateUiMockup(
         mimeType: cached.mimeType,
         prompt,
         requestId: `cached-${cached.hash}`,
-        assetCategory: 'mockup',
+        assetCategory: 'other',
       };
     }
   }
@@ -136,8 +115,9 @@ export async function generateUiMockup(
   const target = await resolveTargetPath({
     workspaceRoot: ws.workspaceRoot,
     framework,
-    assetCategory: 'mockup',
-    prompt: a.component_description,
+    assetCategory: 'other',
+    filename: 'og-image',
+    prompt: a.description,
     mimeType: decoded.mimeType,
     overwrite,
   });
@@ -160,6 +140,6 @@ export async function generateUiMockup(
     mimeType: decoded.mimeType,
     prompt: promptUsed,
     requestId,
-    assetCategory: 'mockup',
+    assetCategory: 'other',
   };
 }
