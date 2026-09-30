@@ -59,6 +59,7 @@ import {
 } from './browser/authDetector.js';
 import { typeAndSubmitChat } from './browser/chatDriver.js';
 import { captureBaseline, extractStream } from './browser/streamExtractor.js';
+import { generateImageViaApi } from './browser/apiDriver.js';
 import { generateImage, type ImageDriverPage } from './browser/imageDriver.js';
 import {
   performStopAction,
@@ -106,6 +107,15 @@ const CHAT_HARD_DEADLINE_MS = 900_000;
  * chrome.exe processes behind otherwise). Kept from the original
  * single-agent shutdown path.
  */
+/** Map an API content-type to the wire-closed image MIME set. */
+function normalizeApiMime(raw: string): 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif' {
+  const lower = raw.toLowerCase().split(';')[0]?.trim() ?? '';
+  if (lower === 'image/jpeg' || lower === 'image/jpg') return 'image/jpeg';
+  if (lower === 'image/webp') return 'image/webp';
+  if (lower === 'image/gif') return 'image/gif';
+  return 'image/png';
+}
+
 export function forceKillChromium(browser: Browser): void {
   try {
     const proc =
@@ -344,10 +354,36 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
           return true;
         };
         const result = await Promise.race([
-          generateImage(imagePage, request.prompt, request.requestId, {
-            stabilizationQuietMs: config.stabilizationQuietMs,
-            attachments: attachmentFiles,
-          }),
+          (async () => {
+            // Phase 8 anti-detection: prefer the same-origin API driver
+            // (no DOM interaction). Fall back to the DOM driver when the
+            // API contract drifts or the page is not signed in.
+            if (config.imageViaApi) {
+              const api = await generateImageViaApi(
+                imagePage,
+                request.prompt,
+                request.requestId,
+                { timeoutMs: 420_000 },
+              );
+              if (api.ok) {
+                return {
+                  ok: true as const,
+                  mediaType: normalizeApiMime(api.mime),
+                  base64: api.base64,
+                };
+              }
+              logAgentEvent({
+                eventType: 'agent.error',
+                errorCategory: 'api_driver_fallback',
+                requestId: request.requestId,
+                code: api.code,
+              });
+            }
+            return generateImage(imagePage, request.prompt, request.requestId, {
+              stabilizationQuietMs: config.stabilizationQuietMs,
+              attachments: attachmentFiles,
+            });
+          })(),
           new Promise<never>((_, reject) => {
             const t = setTimeout(
               () => reject(new Error('image hard deadline exceeded')),
@@ -498,7 +534,7 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
       const title = await page.title().catch(() => '');
       if (!isChallengeTitle(title)) break;
       logAgentEvent({ eventType: 'agent.cloudflare', stage: 'challenge_detected', worker: index, scope: 'boot' });
-      const passed = await tryPassCloudflare(page, { maxAttempts: 4, attemptDelayMs: 2_000 });
+      const passed = await tryPassCloudflare(page, { maxAttempts: 2, attemptDelayMs: 20_000 });
       logAgentEvent({ eventType: 'agent.cloudflare', stage: passed ? 'passed' : 'persisted', worker: index, scope: 'boot' });
       if (passed) break;
       await new Promise((resolve) => setTimeout(resolve, 3_000));
@@ -538,9 +574,9 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
     worker.poller = startAuthPoller(page, (state) => {
       if (state === 'unknown') {
         const nowMs = Date.now();
-        if (nowMs - lastChallengeAttempt > 15_000) {
+        if (nowMs - lastChallengeAttempt > 45_000) {
           lastChallengeAttempt = nowMs;
-          void tryPassCloudflare(page, { maxAttempts: 3, attemptDelayMs: 1_500 })
+          void tryPassCloudflare(page, { maxAttempts: 1, attemptDelayMs: 1_000 })
             .then((passed) => {
               if (passed) {
                 logAgentEvent({
@@ -607,6 +643,11 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
 
       const launched = await launchChromium({
         userDataDir: config.profileDir,
+        // A real user profile (the signed-in daily Chrome) is large — give
+        // its first launch a generous window.
+        timeoutMs: 90_000,
+        totalBudgetMs: 180_000,
+        retryDelayMs: 8_000,
         onDisconnected: onChromiumDisconnected,
       });
       browser = launched;

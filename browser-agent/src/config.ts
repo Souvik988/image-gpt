@@ -68,6 +68,13 @@ export interface AgentConfig {
    * parallelises across tabs automatically. Range 1..8, default 1.
    */
   readonly workerCount: number;
+  /**
+   * Route image generations through the same-origin conversation API
+   * executed inside the page (no DOM interaction, nothing for bot
+   * checks to inspect). The DOM driver remains the fallback. Default
+   * true.
+   */
+  readonly imageViaApi: boolean;
 }
 
 /**
@@ -332,6 +339,12 @@ export function loadConfig(
     600_000,
     deps,
   );
+  const imageViaApi = parseBool(
+    'AGENT_IMAGE_VIA_API',
+    env.AGENT_IMAGE_VIA_API,
+    true,
+    deps,
+  );
   const workerCount = parseIntInRange(
     'AGENT_WORKERS',
     env.AGENT_WORKERS,
@@ -350,5 +363,6 @@ export function loadConfig(
     streamIdleTimeoutMs,
     streamTotalTimeoutMs,
     workerCount,
+    imageViaApi,
   };
 }

@@ -86,6 +86,18 @@ let cachedLauncher: Launcher | null = null;
  */
 async function defaultLauncher(): Promise<Launcher> {
   if (cachedLauncher !== null) return cachedLauncher;
+
+  // Anti-detection core: rebrowser-puppeteer is puppeteer with the CDP
+  // `Runtime.enable` leak patched out — that leak is the primary signal
+  // Cloudflare/Turnstile use to flag automation, and no amount of
+  // UA/spoofing hides it. The strongest fix mode isolates the main world
+  // completely.
+  process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE =
+    process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE ?? 'alwaysIsolate';
+
+  // Wrap the patched core with puppeteer-extra + stealth via addExtra so
+  // the plugin ecosystem (UA, webdriver, chrome.app evasions) still runs
+  // on top of the leak-free transport.
   const puppeteerExtraMod: { default: { use: (p: unknown) => unknown; launch: (o: object) => Promise<Browser> } } =
     (await import('puppeteer-extra')) as unknown as {
       default: { use: (p: unknown) => unknown; launch: (o: object) => Promise<Browser> };
@@ -93,11 +105,30 @@ async function defaultLauncher(): Promise<Launcher> {
   const stealthMod: { default: () => unknown } = (await import(
     'puppeteer-extra-plugin-stealth'
   )) as unknown as { default: () => unknown };
+  const rebrowserMod: { default: object } = (await import(
+    'rebrowser-puppeteer'
+  )) as unknown as { default: object };
+
   const puppeteerExtra = puppeteerExtraMod.default;
   const stealth = stealthMod.default;
-  puppeteerExtra.use(stealth());
+  // addExtra wraps ANY puppeteer instance — here, the rebrowser-patched one.
+  const addExtraFn = (puppeteerExtra as unknown as {
+    addExtra?: (core: object) => { use: (p: unknown) => unknown; launch: (o: object) => Promise<Browser> };
+  }).addExtra;
+  if (addExtraFn === undefined) {
+    // Leak-free transport matters more than plugin evasions: launch the
+    // rebrowser core directly rather than degrading to the leaky one.
+    cachedLauncher = {
+      launch: (opts: object): Promise<Browser> =>
+        (rebrowserMod.default as unknown as { launch: (o: object) => Promise<Browser> }).launch(opts),
+    };
+    return cachedLauncher;
+  }
+  const patched = addExtraFn(rebrowserMod.default);
+  patched.use(stealth());
+
   cachedLauncher = {
-    launch: (opts: object): Promise<Browser> => puppeteerExtra.launch(opts),
+    launch: (opts: object): Promise<Browser> => patched.launch(opts),
   };
   return cachedLauncher;
 }
@@ -270,6 +301,10 @@ export async function launchChromium(opts: LaunchOptions): Promise<Browser> {
     // Linux-only sandbox flags: on Windows/macOS they are no-ops that make
     // Chrome render an "unsupported command-line flag" warning bar — itself
     // an automation signal.
+    // Real-user window geometry: the 800x600 puppeteer default is a
+    // fingerprint signal (Turnstile scores viewport/window size).
+    '--window-size=1536,864',
+    '--lang=en-US',
     ...(process.platform === 'linux'
       ? ['--no-sandbox', '--disable-setuid-sandbox']
       : []),

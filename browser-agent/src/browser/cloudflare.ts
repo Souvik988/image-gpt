@@ -31,9 +31,10 @@ export interface CloudflarePage {
 }
 
 export interface TryPassCloudflareOptions {
-  /** Maximum checkbox-click attempts. Default 8. */
+  /** Maximum checkbox-click attempts. Default 3. */
   maxAttempts?: number;
-  /** Delay between attempts in ms. Default 3500. */
+  /** Delay between attempts in ms. Default 25 000 — rapid retry bursts
+   * read as robotic to Turnstile and cause it to re-issue challenges. */
   attemptDelayMs?: number;
   /** Sleep injection for tests. */
   sleep?: (ms: number) => Promise<void>;
@@ -71,8 +72,8 @@ export async function tryPassCloudflare(
   page: CloudflarePage,
   opts: TryPassCloudflareOptions = {},
 ): Promise<boolean> {
-  const maxAttempts = opts.maxAttempts ?? 8;
-  const attemptDelayMs = opts.attemptDelayMs ?? 3_500;
+  const maxAttempts = opts.maxAttempts ?? 3;
+  const attemptDelayMs = opts.attemptDelayMs ?? 25_000;
   const sleep =
     opts.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
