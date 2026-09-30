@@ -579,16 +579,45 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
         unknownTicks += 1;
         if (unknownTicks % 3 === 1) {
           void detectAuthStateDetailed(page)
-            .then((detail) => {
-              logAgentEvent({
-                eventType: 'agent.error',
-                errorCategory: 'auth_unknown_debug',
-                worker: index,
-                url: detail.url.slice(0, 120),
-                matchedInput: detail.matchedInput ?? null,
-                inputProbesRun: detail.inputProbesRun,
-              });
-            })
+            .then((detail) =>
+              page
+                .evaluate((): {
+                  title: string;
+                  textareaCount: number;
+                  contentEditableCount: number;
+                  hasAskChatGPT: boolean;
+                  bodyLen: number;
+                } => ({
+                  title: document.title,
+                  textareaCount: document.querySelectorAll('textarea').length,
+                  contentEditableCount: document.querySelectorAll('[contenteditable="true"]').length,
+                  hasAskChatGPT: (document.body ? document.body.innerText : '').includes('Ask ChatGPT'),
+                  bodyLen: document.body ? document.body.innerText.length : -1,
+                }))
+                .then((dom) => {
+                  logAgentEvent({
+                    eventType: 'agent.error',
+                    errorCategory: 'auth_unknown_debug',
+                    worker: index,
+                    url: detail.url.slice(0, 120),
+                    matchedInput: detail.matchedInput ?? null,
+                    inputProbesRun: detail.inputProbesRun,
+                    title: dom.title.slice(0, 80),
+                    textareaCount: dom.textareaCount,
+                    contentEditableCount: dom.contentEditableCount,
+                    hasAskChatGPT: dom.hasAskChatGPT,
+                    bodyLen: dom.bodyLen,
+                  });
+                })
+                .catch((e: unknown) => {
+                  logAgentEvent({
+                    eventType: 'agent.error',
+                    errorCategory: 'auth_unknown_debug',
+                    worker: index,
+                    evaluateFailed: String(e).slice(0, 200),
+                  });
+                }),
+            )
             .catch(() => undefined);
         }
       } else {

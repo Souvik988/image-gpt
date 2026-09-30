@@ -40,6 +40,12 @@ export interface AuthDetectorPage {
   url(): string;
   /** Selector probe — returns a non-null handle when the selector matches. */
   $(selector: string): Promise<unknown>;
+  /**
+   * Run a function inside the page. Used for the selector probes —
+   * `page.$` silently fails under the rebrowser alwaysIsolate transport,
+   * in-page evaluate works everywhere.
+   */
+  evaluate<R>(fn: (...args: unknown[]) => R, ...args: unknown[]): Promise<R>;
 }
 
 /**
@@ -87,6 +93,27 @@ export interface AuthProbeDetail {
   inputProbesRun: number;
 }
 
+/**
+ * Probe a selector by running querySelector INSIDE the page via
+ * `evaluate`. The old `page.$` path silently fails under the rebrowser
+ * alwaysIsolate transport (the probe's catch swallowed the error, so
+ * every state read as 'unknown' forever). In-page evaluate is how all
+ * the other DOM drivers read this page and works on every transport.
+ */
+async function probeViaEvaluate(
+  page: Pick<AuthDetectorPage, 'evaluate'>,
+  selector: string,
+): Promise<boolean> {
+  try {
+    const found = await page.evaluate((...args: unknown[]): boolean => {
+      return document.querySelector(args[0] as string) !== null;
+    }, selector);
+    return found === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function detectAuthStateDetailed(
   page: AuthDetectorPage | Page,
 ): Promise<AuthProbeDetail> {
@@ -97,14 +124,14 @@ export async function detectAuthStateDetailed(
     }
   }
   for (const selector of SEL.LOGIN_BUTTON) {
-    if (await probe(page, selector)) {
+    if (await probeViaEvaluate(page, selector)) {
       return { state: 'login_required', url: currentUrl, matchedLogin: selector, inputProbesRun: 0 };
     }
   }
   let inputProbesRun = 0;
   for (const selector of SEL.INPUT) {
     inputProbesRun += 1;
-    if (await probe(page, selector)) {
+    if (await probeViaEvaluate(page, selector)) {
       return { state: 'ready', url: currentUrl, matchedInput: selector, inputProbesRun };
     }
   }

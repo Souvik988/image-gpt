@@ -92,8 +92,12 @@ async function defaultLauncher(): Promise<Launcher> {
   // Cloudflare/Turnstile use to flag automation, and no amount of
   // UA/spoofing hides it. The strongest fix mode isolates the main world
   // completely.
+  // addBinding = rebrowser's default mode: removes the Runtime.enable
+  // leak while keeping evaluate working. (alwaysIsolate also removes the
+  // leak but its acquireContextId breaks on chatgpt.com — verified live:
+  // "acquireContextId failed (tryCount = 3)".)
   process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE =
-    process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE ?? 'alwaysIsolate';
+    process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE ?? 'addBinding';
 
   // Wrap the patched core with puppeteer-extra + stealth via addExtra so
   // the plugin ecosystem (UA, webdriver, chrome.app evasions) still runs
