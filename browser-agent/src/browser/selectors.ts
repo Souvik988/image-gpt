@@ -21,6 +21,11 @@
 export const SEL = {
   /** Chat composer textarea / contenteditable. R9.1. */
   INPUT: [
+    // 2026 unified composer (verified live on chatgpt.com): a plain
+    // textarea regardless of viewport, plus the legacy ids as fallbacks.
+    'textarea#mobile-composer-prompt',
+    'textarea[aria-label="Chat with ChatGPT"]',
+    'textarea[placeholder="Ask ChatGPT"]',
     'textarea[id="prompt-textarea"]',
     'textarea[data-id="prompt-textarea"]',
     'div[contenteditable="true"][data-virtualkeyboard="true"]',

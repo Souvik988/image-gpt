@@ -31,7 +31,12 @@ export interface CloudflarePage {
 }
 
 export interface TryPassCloudflareOptions {
-  /** Maximum checkbox-click attempts. Default 3. */
+  /**
+   * Maximum checkbox-click attempts. Default 2: one automated attempt
+   * is made, then the checkbox is LEFT TO THE HUMAN — continuous
+   * robotic retries poison the session and the user's own click must
+   * land on an untouched widget.
+   */
   maxAttempts?: number;
   /** Delay between attempts in ms. Default 25 000 — rapid retry bursts
    * read as robotic to Turnstile and cause it to re-issue challenges. */
@@ -72,7 +77,7 @@ export async function tryPassCloudflare(
   page: CloudflarePage,
   opts: TryPassCloudflareOptions = {},
 ): Promise<boolean> {
-  const maxAttempts = opts.maxAttempts ?? 3;
+  const maxAttempts = opts.maxAttempts ?? 2;
   const attemptDelayMs = opts.attemptDelayMs ?? 25_000;
   const sleep =
     opts.sleep ??

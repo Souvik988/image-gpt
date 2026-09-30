@@ -79,35 +79,42 @@ async function probe(
  * Implements R8.6 (login_required detection while idle) and R23.1 (login
  * redirect / auth-error detection).
  */
-export async function detectAuthState(
+export interface AuthProbeDetail {
+  state: AuthState;
+  url: string;
+  matchedLogin?: string;
+  matchedInput?: string;
+  inputProbesRun: number;
+}
+
+export async function detectAuthStateDetailed(
   page: AuthDetectorPage | Page,
-): Promise<AuthState> {
-  // 1. URL match — cheapest signal, and the most reliable when the user
-  //    is mid-redirect to /auth/login.
+): Promise<AuthProbeDetail> {
   const currentUrl: string = page.url();
   for (const fragment of AUTH_URL_FRAGMENTS) {
     if (currentUrl.includes(fragment)) {
-      return 'login_required';
+      return { state: 'login_required', url: currentUrl, inputProbesRun: 0 };
     }
   }
-
-  // 2. Login button visible — the landing page renders this when the
-  //    session is unauthenticated but the URL hasn't redirected yet.
   for (const selector of SEL.LOGIN_BUTTON) {
     if (await probe(page, selector)) {
-      return 'login_required';
+      return { state: 'login_required', url: currentUrl, matchedLogin: selector, inputProbesRun: 0 };
     }
   }
-
-  // 3. Composer present — the canonical "we can submit prompts" signal.
+  let inputProbesRun = 0;
   for (const selector of SEL.INPUT) {
+    inputProbesRun += 1;
     if (await probe(page, selector)) {
-      return 'ready';
+      return { state: 'ready', url: currentUrl, matchedInput: selector, inputProbesRun };
     }
   }
+  return { state: 'unknown', url: currentUrl, inputProbesRun };
+}
 
-  // 4. Neither — caller should re-probe.
-  return 'unknown';
+export async function detectAuthState(
+  page: AuthDetectorPage | Page,
+): Promise<AuthState> {
+  return (await detectAuthStateDetailed(page)).state;
 }
 
 /**

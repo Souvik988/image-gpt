@@ -53,6 +53,7 @@ import { createAgentStateMachine, type AgentStateMachine } from './state/machine
 import { launchChromium } from './browser/chromium.js';
 import {
   detectAuthState,
+  detectAuthStateDetailed,
   startAuthPoller,
   type AuthPoller,
   type AuthState,
@@ -571,10 +572,34 @@ export function createWorkerPool(opts: WorkerPoolOptions): WorkerPool {
     // — neither composer nor login button visible — attempt the Turnstile
     // click, throttled so we never hammer the widget.
     let lastChallengeAttempt = 0;
+    let challengeAttempts = 0;
+    let unknownTicks = 0;
     worker.poller = startAuthPoller(page, (state) => {
       if (state === 'unknown') {
+        unknownTicks += 1;
+        if (unknownTicks % 3 === 1) {
+          void detectAuthStateDetailed(page)
+            .then((detail) => {
+              logAgentEvent({
+                eventType: 'agent.error',
+                errorCategory: 'auth_unknown_debug',
+                worker: index,
+                url: detail.url.slice(0, 120),
+                matchedInput: detail.matchedInput ?? null,
+                inputProbesRun: detail.inputProbesRun,
+              });
+            })
+            .catch(() => undefined);
+        }
+      } else {
+        unknownTicks = 0;
+      }
+      if (state === 'unknown') {
         const nowMs = Date.now();
-        if (nowMs - lastChallengeAttempt > 45_000) {
+        // HUMAN-FIRST POLICY: at most TWO automated attempts per boot.
+        // After that the Cloudflare checkbox belongs to the user.
+        if (nowMs - lastChallengeAttempt > 45_000 && challengeAttempts < 2) {
+          challengeAttempts += 1;
           lastChallengeAttempt = nowMs;
           void tryPassCloudflare(page, { maxAttempts: 1, attemptDelayMs: 1_000 })
             .then((passed) => {
