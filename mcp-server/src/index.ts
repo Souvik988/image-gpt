@@ -77,7 +77,7 @@ const SERVER_NAME = 'kiro-gpt-bridge';
  * Server version advertised in the MCP `initialize` response. Matches
  * the workspace placeholder version 0.0.0 until the project ships.
  */
-const SERVER_VERSION = '0.0.0';
+const SERVER_VERSION = '1.0.0';
 /** Default relay URL when `KIRO_GPT_MCP_RELAY_URL` is unset. */
 const DEFAULT_RELAY_URL = 'ws://localhost:3001';
 
